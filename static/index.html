@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quickback</title>
+  <link rel="stylesheet" href="/static/app.css?v=4">
+</head>
+<body>
+  <div class="page">
+    <header class="top">
+      <div>
+        <p class="brand">Quickback</p>
+        <h1>说完就回</h1>
+      </div>
+      <nav class="tabs" aria-label="页面">
+        <button type="button" id="tab-practice" class="tab is-active">练习</button>
+        <button type="button" id="tab-history" class="tab">记录</button>
+        <button type="button" id="tab-questions" class="tab">题目</button>
+      </nav>
+    </header>
+
+    <p id="banner" class="banner" hidden></p>
+
+    <main id="practice">
+      <section id="topic" class="card topic" hidden></section>
+      <section id="turns"></section>
+      <section id="next-prompt" class="card prompt"></section>
+      <section id="recorder" class="recorder">
+        <button type="button" id="record" class="record">开始说</button>
+        <p id="rec-hint" class="hint">点一下开始，说完再点一下。中文卡住了就直接说中文。最长 3 分钟。</p>
+        <button type="button" id="new-question" class="text-btn">换一题</button>
+      </section>
+    </main>
+
+    <main id="history" hidden>
+      <section id="history-list" class="history"></section>
+    </main>
+
+    <main id="questions" hidden>
+      <form id="question-form" class="card question-form">
+        <p class="kicker">新题目</p>
+        <label>英文问题<input name="en" type="text" required maxlength="240"></label>
+        <label>中文意思<input name="zh" type="text" required maxlength="240"></label>
+        <button type="submit" class="primary">添加</button>
+      </form>
+      <section id="question-list" class="question-list"></section>
+    </main>
+
+    <footer class="foot">
+      录音存在这台电脑。识别和反馈会把这一小段发给 Gemini 免费接口。
+    </footer>
+  </div>
+  <script src="/static/questions.js?v=4"></script>
+  <script src="/static/app.js?v=4"></script>
+</body>
+</html>

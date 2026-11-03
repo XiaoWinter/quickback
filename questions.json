@@ -1,0 +1,72 @@
+[
+  {
+    "id": "city-food",
+    "en": "What food do you like in the city where you live?",
+    "zh": "在你住的城市里，你喜欢吃什么？"
+  },
+  {
+    "id": "weekend-morning",
+    "en": "What do you usually do on a weekend morning?",
+    "zh": "周末早上你一般做什么？"
+  },
+  {
+    "id": "where-you-live",
+    "en": "Describe the place you live in now.",
+    "zh": "说说你现在住的地方。"
+  },
+  {
+    "id": "get-around",
+    "en": "How do you usually get around your city?",
+    "zh": "你在这座城市里一般怎么出门？"
+  },
+  {
+    "id": "yesterday-meal",
+    "en": "What did you eat yesterday?",
+    "zh": "你昨天吃了什么？"
+  },
+  {
+    "id": "a-shop",
+    "en": "Talk about a shop or market you like in your city.",
+    "zh": "说说你喜欢的一家店或一个市场。"
+  },
+  {
+    "id": "after-work",
+    "en": "What do you usually do after work or study?",
+    "zh": "下班或放学之后你一般做什么？"
+  },
+  {
+    "id": "weather",
+    "en": "What weather do you like, and what do you do in it?",
+    "zh": "你喜欢什么样的天气？那种天气里你会做什么？"
+  },
+  {
+    "id": "cook-for-friend",
+    "en": "What would you cook for a friend, and why?",
+    "zh": "你会给朋友做什么吃的？为什么？"
+  },
+  {
+    "id": "this-month",
+    "en": "What do you want to do in your city this month?",
+    "zh": "这个月你想在这座城市里做什么？"
+  },
+  {
+    "id": "neighborhood",
+    "en": "What is your neighborhood like?",
+    "zh": "你住的这一带是什么样的？"
+  },
+  {
+    "id": "morning-routine",
+    "en": "Walk through a typical morning for you.",
+    "zh": "按顺序说说你平常的早晨。"
+  },
+  {
+    "id": "a-drink",
+    "en": "What do you like to drink, and when do you have it?",
+    "zh": "你喜欢喝什么？一般什么时候喝？"
+  },
+  {
+    "id": "show-a-visitor",
+    "en": "Describe a place in your city you would take a visitor.",
+    "zh": "如果有人来找你，你会带对方去哪里？说说那个地方。"
+  }
+]
