@@ -9,9 +9,18 @@ from app.gemini_client import (
     transcript_from_response,
     wav_from_response,
 )
-from app.questions import create_question, delete_question, load_questions, next_question, update_question, QuestionError
+from app.practice import PracticeStore
+from app.questions import (
+    QuestionError,
+    backfill_timestamps,
+    create_question,
+    delete_question,
+    load_questions,
+    next_question,
+    update_question,
+)
 from app.segments import split_transcript
-from app.storage import SessionStore
+from app.storage import SessionStore, StorageError
 
 
 class SegmentTests(unittest.TestCase):
@@ -48,8 +57,26 @@ class FeedbackTests(unittest.TestCase):
         """
         data = parse_feedback(raw)
         self.assertTrue(data["natural"].startswith("I like noodles"))
+        self.assertEqual(data["natural_zh"], "")
+        self.assertEqual(data["spoken_zh"], "")
         self.assertEqual(len(data["extensions"]), 1)
         self.assertNotIn("once a week", data["natural"])
+
+    def test_parse_keeps_the_chinese_under_the_answer(self):
+        raw = """
+        {
+          "natural": "Yesterday I ate instant noodles.",
+          "natural_zh": "昨天我吃了方便面。",
+          "spoken_zh": "昨天我吃了快速方便面。",
+          "changes": [],
+          "extensions": [],
+          "follow_up": "Did you add anything?",
+          "follow_up_zh": "你加了什么吗？"
+        }
+        """
+        data = parse_feedback(raw)
+        self.assertEqual(data["natural_zh"], "昨天我吃了方便面。")
+        self.assertEqual(data["spoken_zh"], "昨天我吃了快速方便面。")
 
     def test_transcript_comes_from_audio_transcription(self):
         class Transcription:
@@ -102,13 +129,18 @@ class FeedbackTests(unittest.TestCase):
         feedback = apply_review_policy(
             {
                 "natural": "I am quite fond of hot pot, although it is somewhat pricey.",
+                "natural_zh": "我相当喜欢火锅，尽管它有点贵。",
+                "spoken_zh": "我喜欢火锅，但是有点贵。",
                 "changes": [{"spoken": "I like hot pot", "better": "I am quite fond of hot pot", "note": "再润色"}],
                 "review": "还可以把 fond 换成更高级的说法。",
             },
             suggested,
             suggested,
+            "我喜欢火锅，但是有点贵。",
         )
         self.assertEqual(feedback["natural"], suggested)
+        self.assertEqual(feedback["natural_zh"], "我喜欢火锅，但是有点贵。")
+        self.assertEqual(feedback["spoken_zh"], "我喜欢火锅，但是有点贵。")
         self.assertEqual(feedback["changes"], [])
         self.assertEqual(feedback["review"], "")
 
@@ -176,6 +208,83 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(mime, "audio/wav")
             self.assertEqual(path.read_bytes(), b"RIFFspeech")
             self.assertEqual(spoken["turns"][0]["speech_file"], "turn-01-speech.wav")
+            edited = store.update_question_text(session["id"], "What food do you like?", "你喜欢吃什么？")
+            self.assertEqual(edited["question"]["zh"], "你喜欢吃什么？")
+            self.assertEqual(edited["turns"][0]["prompt"]["en"], "What food?")
+            follow = store.update_follow_up(session["id"], "Do you cook it at home?", "你在家做吗？")
+            self.assertEqual(follow["pending_prompt"]["en"], "Do you cook it at home?")
+            self.assertEqual(follow["turns"][0]["feedback"]["follow_up_zh"], "你在家做吗？")
+            cleared = store.clear_follow_up(session["id"])
+            self.assertEqual(cleared["pending_prompt"]["en"], "What food?")
+            self.assertEqual(cleared["turns"][0]["feedback"]["follow_up"], "")
+            with self.assertRaises(StorageError):
+                store.update_follow_up(session["id"], "", "没有英文")
+            session, second = store.append_audio(session["id"], b"RIFFsecond-audio", "audio/wav", 900)
+            self.assertEqual(second, 2)
+            store.save_speech(session["id"], 2, b"RIFFspeech-2")
+            edited_turn = store.update_answered_turn(
+                session["id"],
+                1,
+                "What did you eat?",
+                "你吃了什么？",
+                "I like hot pot.",
+                "我喜欢火锅。",
+            )
+            self.assertEqual(edited_turn["turns"][0]["prompt"]["zh"], "你吃了什么？")
+            self.assertEqual(edited_turn["turns"][0]["feedback"]["natural_zh"], "我喜欢火锅。")
+            removed = store.delete_turn(session["id"], 1)
+            self.assertEqual([item["index"] for item in removed["turns"]], [1])
+            self.assertEqual(removed["turns"][0]["audio_file"], "turn-01.wav")
+            self.assertEqual(removed["turns"][0]["speech_file"], "turn-01-speech.wav")
+            kept = store.audio_path(session["id"], 1)[0]
+            self.assertEqual(kept.read_bytes(), b"RIFFsecond-audio")
+            self.assertFalse((kept.parent / "turn-02.wav").exists())
+
+    def test_retake_replaces_one_turn_and_drops_its_old_speech(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp))
+            session = store.create({"id": "city-food", "en": "What food?", "zh": "吃什么？"})
+            session, _ = store.append_audio(session["id"], b"RIFFfirst", "audio/wav", 1000)
+            store.update_turn(
+                session["id"],
+                1,
+                status="ready",
+                transcript="I like noodles",
+                feedback={"natural": "I like noodles.", "follow_up": "Spicy?", "follow_up_zh": "辣吗？"},
+            )
+            session, _ = store.append_audio(session["id"], b"RIFFsecond", "audio/wav", 1000)
+            session = store.update_turn(
+                session["id"],
+                2,
+                status="ready",
+                transcript="Yes a bit",
+                feedback={"natural": "Yes, a bit.", "follow_up": "At home?", "follow_up_zh": "在家吗？"},
+            )
+            store.save_speech(session["id"], 1, b"RIFFspeech-1", "I like noodles.")
+            store.save_speech(session["id"], 2, b"RIFFspeech-2", "Yes, a bit.")
+            prompt = session["turns"][0]["prompt"]
+
+            replaced = store.replace_audio(session["id"], 1, b"webm-new-answer", "audio/webm", 1500)
+            first = replaced["turns"][0]
+            self.assertEqual(first["prompt"], prompt)
+            self.assertEqual(first["audio_file"], "turn-01.webm")
+            self.assertIsNone(first["feedback"])
+            self.assertNotIn("speech_file", first)
+            self.assertEqual(first["status"], "saved")
+            self.assertEqual(replaced["turns"][1]["transcript"], "Yes a bit")
+            self.assertEqual(replaced["pending_prompt"]["en"], "At home?")
+            folder = Path(tmp) / session["id"]
+            self.assertEqual((folder / "turn-01.webm").read_bytes(), b"webm-new-answer")
+            self.assertFalse((folder / "turn-01.wav").exists())
+            self.assertFalse((folder / "turn-01-speech.wav").exists())
+            self.assertTrue((folder / "turn-02-speech.wav").exists())
+
+            last = store.replace_audio(session["id"], 2, b"RIFFlast", "audio/wav", 1200)
+            self.assertEqual(last["pending_prompt"]["en"], last["turns"][1]["prompt"]["en"])
+            self.assertFalse((folder / "turn-02-speech.wav").exists())
+            stale = store.save_speech(session["id"], 1, b"RIFFold", "I like noodles.")
+            self.assertNotIn("speech_file", stale["turns"][0])
+            self.assertFalse((folder / "turn-01-speech.wav").exists())
 
 
 class QuestionTests(unittest.TestCase):
@@ -195,11 +304,41 @@ class QuestionTests(unittest.TestCase):
                 delete_question("only-one", path)
             created = create_question("What season do you like?", "你喜欢哪个季节？", path)
             self.assertEqual(created["id"], "what-season-do-you-like")
+            self.assertTrue(created["created_at"])
+            self.assertEqual(created["created_at"], created["updated_at"])
             updated = update_question(created["id"], created["en"], "你最喜欢什么季节？", path)
             self.assertEqual(updated["zh"], "你最喜欢什么季节？")
+            self.assertEqual(updated["created_at"], created["created_at"])
+            self.assertNotEqual(updated["updated_at"], "")
             delete_question(created["id"], path)
             ids = [item["id"] for item in load_questions(path)]
             self.assertEqual(ids, ["only-one"])
+            kept = load_questions(path)[0]
+            self.assertTrue(kept["created_at"])
+            self.assertTrue(kept["updated_at"])
+
+    def test_backfill_adds_missing_times_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "questions.json"
+            path.write_text('[{"id":"only-one","en":"Only one?","zh":"只剩一道？"}]\n', encoding="utf-8")
+            first = backfill_timestamps(path)
+            second = backfill_timestamps(path)
+            self.assertEqual(first[0]["created_at"], second[0]["created_at"])
+            self.assertEqual(first[0]["created_at"], first[0]["updated_at"])
+            self.assertIn("T", first[0]["created_at"])
+
+    def test_practice_remembers_the_question(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PracticeStore(Path(tmp) / "state.json")
+            self.assertEqual(store.read(), {"question_id": "", "session_id": ""})
+            store.write(question_id="city-food")
+            self.assertEqual(store.read()["question_id"], "city-food")
+            store.write(question_id="city-food", session_id="abc")
+            store.forget_question("city-food")
+            self.assertEqual(store.read()["session_id"], "abc")
+            store.write(question_id="city-food")
+            store.forget_question("city-food")
+            self.assertEqual(store.read()["question_id"], "")
 
 
 if __name__ == "__main__":

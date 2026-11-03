@@ -2,9 +2,11 @@ import json
 import random
 import re
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from app.config import ROOT
+from app.storage import now_iso
 
 QUESTIONS_PATH = ROOT / "questions.json"
 _ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -40,11 +42,48 @@ def _unique_id(en: str, taken: set[str]) -> str:
     return candidate
 
 
+def _time(value) -> str:
+    text = _clean(value)
+    if not text:
+        return ""
+    try:
+        datetime.fromisoformat(text)
+    except ValueError:
+        return ""
+    return text
+
+
 def _save(questions: list[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(questions, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def _fallback_time(path: Path) -> str:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
+    except OSError:
+        return now_iso()
+
+
+def _fill_times(questions: list[dict], path: Path) -> bool:
+    fallback = _fallback_time(path)
+    changed = False
+    for item in questions:
+        if not item["created_at"]:
+            item["created_at"] = fallback
+            item["updated_at"] = fallback
+            changed = True
+        elif not item["updated_at"]:
+            item["updated_at"] = item["created_at"]
+            changed = True
+    return changed
+
+
+def _persist(questions: list[dict], path: Path) -> None:
+    _fill_times(questions, path)
+    _save(questions, path)
 
 
 def load_questions(path: Path | None = None) -> list[dict]:
@@ -70,8 +109,19 @@ def load_questions(path: Path | None = None) -> list[dict]:
         if qid in seen:
             raise QuestionError(f"题目 id 重复：{qid}")
         seen.add(qid)
-        questions.append({"id": qid, "en": en, "zh": zh})
+        created = _time(item.get("created_at"))
+        updated = _time(item.get("updated_at")) or created
+        questions.append({"id": qid, "en": en, "zh": zh, "created_at": created, "updated_at": updated})
     return questions
+
+
+def backfill_timestamps(path: Path | None = None) -> list[dict]:
+    file = _path(path)
+    with _lock:
+        questions = load_questions(file)
+        if _fill_times(questions, file):
+            _save(questions, file)
+        return questions
 
 
 def next_question(exclude: str | None = None) -> dict:
@@ -94,9 +144,16 @@ def create_question(en: str, zh: str, path: Path | None = None) -> dict:
     file = _path(path)
     with _lock:
         questions = load_questions(file)
-        item = {"id": _unique_id(en, {q["id"] for q in questions}), "en": en, "zh": zh}
+        now = now_iso()
+        item = {
+            "id": _unique_id(en, {q["id"] for q in questions}),
+            "en": en,
+            "zh": zh,
+            "created_at": now,
+            "updated_at": now,
+        }
         questions.append(item)
-        _save(questions, file)
+        _persist(questions, file)
         return item
 
 
@@ -111,7 +168,9 @@ def update_question(question_id: str, en: str, zh: str, path: Path | None = None
             if item["id"] == question_id:
                 item["en"] = en
                 item["zh"] = zh
-                _save(questions, file)
+                item["created_at"] = item["created_at"] or now_iso()
+                item["updated_at"] = now_iso()
+                _persist(questions, file)
                 return item
     raise QuestionError(f"没有这道题：{question_id}")
 
@@ -125,4 +184,4 @@ def delete_question(question_id: str, path: Path | None = None) -> None:
         kept = [item for item in questions if item["id"] != question_id]
         if len(kept) == len(questions):
             raise QuestionError(f"没有这道题：{question_id}")
-        _save(kept, file)
+        _persist(kept, file)

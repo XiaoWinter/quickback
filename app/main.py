@@ -7,9 +7,18 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import ROOT, settings
 from app.gemini_client import GeminiClient, GeminiError
-from app.questions import QuestionError, create_question, delete_question, get_question, load_questions, next_question, update_question
+from app.practice import PracticeStore
+from app.questions import (
+    QuestionError,
+    backfill_timestamps,
+    create_question,
+    delete_question,
+    get_question,
+    next_question,
+    update_question,
+)
 from app.segments import split_transcript
-from app.storage import NotFound, SessionStore, normalize_mime
+from app.storage import NotFound, SessionStore, StorageError, normalize_mime
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("quickback")
@@ -19,7 +28,16 @@ MIN_AUDIO_BYTES = 400
 
 app = FastAPI(title="Quickback")
 store = SessionStore(settings.data_dir)
+practice = PracticeStore()
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+
+
+@app.on_event("startup")
+def prepare_questions() -> None:
+    try:
+        backfill_timestamps()
+    except QuestionError as exc:
+        log.warning("%s", exc)
 
 
 def _client() -> GeminiClient:
@@ -57,7 +75,7 @@ def health():
 @app.get("/api/questions")
 def questions_list():
     try:
-        return load_questions()
+        return backfill_timestamps()
     except QuestionError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -84,7 +102,61 @@ def questions_remove(question_id: str):
         delete_question(question_id)
     except QuestionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    practice.forget_question(question_id)
     return {"ok": True}
+
+
+def _practice_view() -> dict:
+    current = practice.read()
+    if current["session_id"]:
+        try:
+            return {"question": None, "session": store.get(current["session_id"])}
+        except NotFound:
+            practice.write(question_id=current["question_id"], session_id="")
+            current["session_id"] = ""
+    if current["question_id"]:
+        try:
+            return {"question": get_question(current["question_id"]), "session": None}
+        except QuestionError:
+            practice.write()
+    latest = store.list_summaries()
+    if latest:
+        session_id = latest[0]["id"]
+        session = store.get(session_id)
+        practice.write(question_id=session["question"]["id"], session_id=session_id)
+        return {"question": None, "session": session}
+    try:
+        question = next_question()
+    except QuestionError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    practice.write(question_id=question["id"])
+    return {"question": question, "session": None}
+
+
+@app.get("/api/practice")
+def practice_get():
+    return _practice_view()
+
+
+@app.put("/api/practice")
+def practice_put(payload: dict):
+    session_id = _blank(str(payload.get("session_id") or ""))
+    question_id = _blank(str(payload.get("question_id") or ""))
+    if session_id:
+        try:
+            session = store.get(session_id)
+        except NotFound as exc:
+            raise HTTPException(status_code=404, detail="找不到这条记录。") from exc
+        practice.write(question_id=session["question"]["id"], session_id=session_id)
+        return {"question": None, "session": session}
+    if question_id:
+        try:
+            question = get_question(question_id)
+        except QuestionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        practice.write(question_id=question["id"], session_id="")
+        return {"question": question, "session": None}
+    raise HTTPException(status_code=400, detail="要指定题目或记录。")
 
 
 @app.get("/api/questions/next")
@@ -106,6 +178,70 @@ def get_session(session_id: str):
         return store.get(session_id)
     except NotFound as exc:
         raise HTTPException(status_code=404, detail="找不到这条记录。") from exc
+
+
+@app.put("/api/sessions/{session_id}/question")
+def session_question(session_id: str, payload: dict):
+    try:
+        session = store.update_question_text(session_id, payload.get("en"), payload.get("zh"))
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这条记录。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    question = session["question"]
+    try:
+        update_question(question["id"], question["en"], question["zh"])
+    except QuestionError:
+        pass
+    return session
+
+
+@app.put("/api/sessions/{session_id}/follow-up")
+def session_follow_up(session_id: str, payload: dict):
+    try:
+        return store.update_follow_up(session_id, payload.get("en"), payload.get("zh"))
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这条记录。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/sessions/{session_id}/turns/{index}")
+def session_turn_update(session_id: str, index: int, payload: dict):
+    try:
+        natural = payload.get("natural") if "natural" in payload else None
+        return store.update_answered_turn(
+            session_id,
+            index,
+            payload.get("en"),
+            payload.get("zh"),
+            natural,
+            payload.get("natural_zh"),
+        )
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/sessions/{session_id}/turns/{index}")
+def session_turn_delete(session_id: str, index: int):
+    try:
+        return store.delete_turn(session_id, index)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/sessions/{session_id}/follow-up")
+def session_clear_follow_up(session_id: str):
+    try:
+        return store.clear_follow_up(session_id)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这条记录。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/sessions/{session_id}/turns/{index}/speech")
@@ -132,7 +268,7 @@ async def create_speech(session_id: str, index: int):
         detail = detail.replace("录音已留下，过一会儿点重试。", "稍后再打开这条记录。")
         raise HTTPException(status_code=502, detail=detail) from exc
     log.info("speech %s/%s saved %s bytes", session_id, index, len(audio))
-    return store.save_speech(session_id, index, audio)
+    return store.save_speech(session_id, index, audio, natural)
 
 
 @app.get("/api/sessions/{session_id}/speech/{index}")
@@ -183,7 +319,31 @@ async def create_turn(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     mime = normalize_mime(mime_type or audio.content_type)
-    _session, index = store.append_audio(session_id, data, mime, duration_ms)
+    saved, index = store.append_audio(session_id, data, mime, duration_ms)
+    practice.write(question_id=saved["question"]["id"], session_id=session_id)
+    return await _process(session_id, index)
+
+
+@app.post("/api/sessions/{session_id}/turns/{index}/retake")
+async def retake_turn(
+    session_id: str,
+    index: int,
+    audio: UploadFile = File(...),
+    mime_type: str | None = Form(None),
+    duration_ms: int | None = Form(None),
+):
+    data = await audio.read()
+    if len(data) < MIN_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="录音太短了，再说长一点。")
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="这段录音太长了，控制在 3 分钟内。")
+    mime = normalize_mime(mime_type or audio.content_type)
+    try:
+        store.replace_audio(session_id, index, data, mime, duration_ms)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return await _process(session_id, index)
 
 
@@ -220,12 +380,15 @@ async def _process(session_id: str, index: int) -> dict:
         client = _client()
         transcript = await asyncio.to_thread(client.transcribe, audio_path.read_bytes(), mime)
         previous_natural = ""
+        previous_natural_zh = ""
         for earlier in session["turns"]:
             if earlier["index"] >= index:
                 continue
-            earlier_natural = str((earlier.get("feedback") or {}).get("natural") or "").strip()
+            earlier_feedback = earlier.get("feedback") or {}
+            earlier_natural = str(earlier_feedback.get("natural") or "").strip()
             if earlier_natural:
                 previous_natural = earlier_natural
+                previous_natural_zh = str(earlier_feedback.get("natural_zh") or "").strip()
         feedback = await asyncio.to_thread(
             client.feedback,
             topic_en=session["question"]["en"],
@@ -234,6 +397,7 @@ async def _process(session_id: str, index: int) -> dict:
             prompt_zh=turn["prompt"]["zh"],
             transcript=transcript,
             previous_natural=previous_natural,
+            previous_natural_zh=previous_natural_zh,
         )
     except GeminiError as exc:
         log.info("turn %s/%s failed: %s", session_id, index, exc)

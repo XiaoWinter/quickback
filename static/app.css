@@ -112,6 +112,10 @@ h1 {
 #turns { display: grid; gap: 0.8rem; }
 
 .turn { display: grid; gap: 0.85rem; }
+.turn.is-retake { box-shadow: inset 0 0 0 1px var(--accent); }
+.turn-question { display: grid; gap: 0.3rem; }
+.turn-question .question-actions { margin-top: 0.2rem; }
+.retake-slot:empty { display: none; }
 
 .transcript {
   font-size: 1.08rem;
@@ -130,7 +134,16 @@ h1 {
   font-family: Georgia, "Palatino Linotype", Palatino, serif;
   font-size: 1.28rem;
   line-height: 1.45;
-  margin-bottom: 0.85rem;
+  margin-bottom: 0.25rem;
+}
+
+.natural:last-of-type { margin-bottom: 0.85rem; }
+
+.meaning {
+  margin: 0.2rem 0 0.85rem;
+  color: var(--muted);
+  font-size: 0.98rem;
+  line-height: 1.5;
 }
 
 .meta, .hint, .foot, .note, .empty {
@@ -166,6 +179,16 @@ audio { width: 100%; margin-top: 0.35rem; }
   gap: 0.55rem;
 }
 
+.recorder.is-inline {
+  margin-top: 0.15rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--line);
+  justify-items: stretch;
+}
+
+.recorder.is-inline .hint { text-align: center; }
+.recorder.is-inline .take-review { width: 100%; }
+
 .record {
   width: 100%;
   height: 3.4rem;
@@ -178,6 +201,18 @@ audio { width: 100%; margin-top: 0.35rem; }
 }
 
 .record:disabled { opacity: 0.55; cursor: wait; }
+
+.take-review {
+  width: min(100%, 24rem);
+  display: grid;
+  justify-items: center;
+  gap: 0.7rem;
+}
+
+.take-review audio { margin-top: 0; }
+
+.take-actions { display: flex; gap: 0.9rem; align-items: center; }
+.take-actions .primary { margin-top: 0; }
 
 .record.is-recording {
   background: #8e2618;
@@ -202,7 +237,7 @@ audio { width: 100%; margin-top: 0.35rem; }
 
 .history, .question-list { display: grid; gap: 0.6rem; }
 
-.question-form label, .question-item label {
+.question-form label, .question-item label, .prompt-edit label {
   display: grid;
   gap: 0.3rem;
   margin-top: 0.75rem;
@@ -210,7 +245,7 @@ audio { width: 100%; margin-top: 0.35rem; }
   font-size: 0.85rem;
 }
 
-.question-form input, .question-item input {
+.question-form input, .question-item input, .prompt-edit input {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -229,6 +264,14 @@ audio { width: 100%; margin-top: 0.35rem; }
 }
 
 .question-item { margin-top: 0.7rem; }
+
+.question-meta {
+  margin: 0 0 0.35rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.question-current { color: var(--en); font-weight: 650; }
 .question-actions { display: flex; gap: 0.9rem; align-items: center; margin-top: 0.75rem; }
 .question-actions .primary { margin-top: 0; }
 
@@ -243,6 +286,38 @@ audio { width: 100%; margin-top: 0.35rem; }
 
 .history-item strong { display: block; font-weight: 600; }
 .history-item span { display: block; margin-top: 0.25rem; color: var(--muted); font-size: 0.9rem; }
+
+.confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(31, 27, 22, 0.35);
+}
+
+.confirm[hidden] { display: none; }
+
+.confirm-card {
+  width: min(22rem, 100%);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  padding: 1.15rem 1.15rem 1rem;
+}
+
+.confirm-card p { margin: 0; line-height: 1.5; }
+
+.confirm-actions {
+  display: flex;
+  gap: 0.9rem;
+  align-items: center;
+  margin-top: 1rem;
+}
+
+.confirm-actions .primary { margin-top: 0; background: var(--accent); color: var(--accent-ink); }
 
 .foot { margin-top: 1.5rem; }
 

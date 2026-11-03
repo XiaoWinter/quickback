@@ -29,6 +29,8 @@ Verbatim answer:
 Return one JSON object and nothing else. Use this shape:
 {{
   "natural": "English only",
+  "natural_zh": "地道版的简体中文",
+  "spoken_zh": "原话的简体中文",
   "changes": [{{"spoken": "short fragment they said", "better": "the replacement", "note": "一句简体中文"}}],
   "extensions": [{{"line": "one extra English sentence", "note": "一句简体中文"}}],
   "follow_up": "one English question",
@@ -45,9 +47,18 @@ Rules for natural:
 - Do not make the line fancier or longer.
 - If the whole answer is already natural English, natural must be the transcript itself and changes must be [].
 
+Rules for spoken_zh and natural_zh:
+- spoken_zh translates the verbatim answer into Simplified Chinese. Translate the English parts. Keep the meaning of the Chinese parts. Do not upgrade it into the natural answer.
+- natural_zh translates natural into Simplified Chinese, sentence by sentence.
+- Translate the words that were written, even if the English may not be what the learner meant.
+- Do not correct, soften, or add meaning. The learner compares these two Chinese lines.
+- Keep names and numbers as they are.
+
 Example of the right amount of editing:
 Transcript: "I like noodles, 但是有点贵."
+spoken_zh: "我喜欢面条，但是有点贵。"
 natural: "I like noodles, but they're a bit expensive."
+natural_zh: "我喜欢面条，但是有点贵。"
 changes: [{{"spoken": "但是有点贵", "better": "but they're a bit expensive", "note": "后半句卡住了，按原意说成英文。"}}]
 A wrong edit would be: "I'm particularly fond of the local hand-pulled noodles, though I find them somewhat pricey."
 

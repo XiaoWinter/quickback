@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Quickback</title>
-  <link rel="stylesheet" href="/static/app.css?v=4">
+  <link rel="stylesheet" href="/static/app.css?v=14">
 </head>
 <body>
   <div class="page">
@@ -28,7 +28,16 @@
       <section id="next-prompt" class="card prompt"></section>
       <section id="recorder" class="recorder">
         <button type="button" id="record" class="record">开始说</button>
-        <p id="rec-hint" class="hint">点一下开始，说完再点一下。中文卡住了就直接说中文。最长 3 分钟。</p>
+        <div id="take-review" class="take-review" hidden>
+          <p id="take-hint" class="hint">这段还在本机。听一遍，满意再送出。</p>
+          <audio id="take-audio" controls></audio>
+          <div class="take-actions">
+            <button type="button" id="send-take" class="primary">就用这段</button>
+            <button type="button" id="redo-take" class="text-btn">重说</button>
+          </div>
+        </div>
+        <p id="rec-hint" class="hint">点一下开始，说完再点一下。听完再决定要不要送出。中文卡住了就直接说中文。最长 3 分钟。</p>
+        <button type="button" id="cancel-retake" class="text-btn" hidden>取消重答</button>
         <button type="button" id="new-question" class="text-btn">换一题</button>
       </section>
     </main>
@@ -51,7 +60,16 @@
       录音存在这台电脑。识别和反馈会把这一小段发给 Gemini 免费接口。
     </footer>
   </div>
-  <script src="/static/questions.js?v=4"></script>
-  <script src="/static/app.js?v=4"></script>
+  <div id="confirm-dialog" class="confirm" hidden>
+    <div class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="confirm-text">
+      <p id="confirm-text"></p>
+      <div class="confirm-actions">
+        <button type="button" id="confirm-ok" class="primary">删除</button>
+        <button type="button" id="confirm-cancel" class="text-btn">取消</button>
+      </div>
+    </div>
+  </div>
+  <script src="/static/questions.js?v=7"></script>
+  <script src="/static/app.js?v=14"></script>
 </body>
 </html>

@@ -32,6 +32,16 @@ def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _prompt_text(en: str, zh: str) -> tuple[str, str]:
+    en = str(en or "").strip()
+    zh = str(zh or "").strip()
+    if not en or not zh:
+        raise StorageError("英文和中文都要写。")
+    if len(en) > 240 or len(zh) > 240:
+        raise StorageError("这句太长了。")
+    return en, zh
+
+
 def normalize_mime(mime: str | None) -> str:
     base = (mime or "").split(";", 1)[0].strip().lower()
     return base or "application/octet-stream"
@@ -132,6 +142,46 @@ class SessionStore:
             self._write(session)
             return session, index
 
+    def replace_audio(
+        self,
+        session_id: str,
+        index: int,
+        data: bytes,
+        mime: str,
+        duration_ms: int | None,
+    ) -> dict:
+        mime = normalize_mime(mime)
+        ext = EXT_BY_MIME.get(mime, ".bin")
+        filename = f"turn-{index:02d}{ext}"
+        if not _AUDIO.match(filename):
+            raise StorageError("这段录音的格式不支持。")
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            folder = self._dir(session_id)
+            old_audio = turn.get("audio_file") or ""
+            (folder / filename).write_bytes(data)
+            if old_audio and old_audio != filename:
+                self._delete_named_files(folder, old_audio)
+            self._delete_named_files(folder, turn.get("speech_file"))
+            turn["created_at"] = now_iso()
+            turn["duration_ms"] = duration_ms
+            turn["audio_file"] = filename
+            turn["mime_type"] = mime
+            turn["transcript"] = ""
+            turn["segments"] = []
+            turn["feedback"] = None
+            turn["status"] = "saved"
+            turn["error"] = None
+            turn.pop("speech_file", None)
+            turn.pop("speech_mime", None)
+            turn.pop("speech_error", None)
+            if session["turns"][-1]["index"] == index:
+                prompt = turn.get("prompt") or session["question"]
+                session["pending_prompt"] = {"en": prompt.get("en", ""), "zh": prompt.get("zh", "")}
+            self._write(session)
+            return session
+
     def update_turn(self, session_id: str, index: int, **fields) -> dict:
         with self._lock:
             session = self._read(session_id)
@@ -146,13 +196,106 @@ class SessionStore:
             self._write(session)
             return session
 
-    def save_speech(self, session_id: str, index: int, data: bytes) -> dict:
+    def update_question_text(self, session_id: str, en: str, zh: str) -> dict:
+        en, zh = _prompt_text(en, zh)
+        with self._lock:
+            session = self._read(session_id)
+            pending = session.get("pending_prompt") or {}
+            same_as_question = pending.get("en") == session["question"]["en"] and pending.get("zh") == session["question"]["zh"]
+            session["question"]["en"] = en
+            session["question"]["zh"] = zh
+            if not session.get("turns") or same_as_question:
+                session["pending_prompt"] = {"en": en, "zh": zh}
+            self._write(session)
+            return session
+
+    def update_follow_up(self, session_id: str, en: str, zh: str) -> dict:
+        en, zh = _prompt_text(en, zh)
+        with self._lock:
+            session = self._read(session_id)
+            if not session.get("turns"):
+                raise StorageError("还没有回答，不能改追问。")
+            last = session["turns"][-1]
+            feedback = last.get("feedback")
+            if isinstance(feedback, dict):
+                feedback["follow_up"] = en
+                feedback["follow_up_zh"] = zh
+            session["pending_prompt"] = {"en": en, "zh": zh}
+            self._write(session)
+            return session
+
+    def clear_follow_up(self, session_id: str) -> dict:
+        with self._lock:
+            session = self._read(session_id)
+            if not session.get("turns"):
+                raise StorageError("没有追问。")
+            last = session["turns"][-1]
+            feedback = last.get("feedback")
+            if isinstance(feedback, dict):
+                feedback["follow_up"] = ""
+                feedback["follow_up_zh"] = ""
+            prompt = last.get("prompt") or session["question"]
+            session["pending_prompt"] = {"en": prompt.get("en", ""), "zh": prompt.get("zh", "")}
+            self._write(session)
+            return session
+
+    def update_answered_turn(
+        self,
+        session_id: str,
+        index: int,
+        en: str,
+        zh: str,
+        natural: str | None = None,
+        natural_zh: str | None = None,
+    ) -> dict:
+        en, zh = _prompt_text(en, zh)
+        if natural is not None:
+            natural = str(natural or "").strip()
+            natural_zh = str(natural_zh or "").strip()
+            if not natural:
+                raise StorageError("地道版不能空。")
+            if len(natural) > 800 or len(natural_zh) > 500:
+                raise StorageError("这句太长了。")
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            old = turn.get("prompt") or {}
+            turn["prompt"] = {"en": en, "zh": zh}
+            feedback = turn.get("feedback")
+            if natural is not None and isinstance(feedback, dict):
+                feedback["natural"] = natural
+                feedback["natural_zh"] = natural_zh
+            pending = session.get("pending_prompt") or {}
+            is_last = session["turns"][-1]["index"] == index
+            if is_last and pending.get("en") == old.get("en") and pending.get("zh") == old.get("zh"):
+                session["pending_prompt"] = {"en": en, "zh": zh}
+            self._write(session)
+            return session
+
+    def delete_turn(self, session_id: str, index: int) -> dict:
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            folder = self._dir(session_id)
+            was_last = session["turns"][-1]["index"] == index
+            self._delete_named_files(folder, turn.get("audio_file"), turn.get("speech_file"))
+            session["turns"] = [item for item in session["turns"] if item.get("index") != index]
+            self._renumber_turns(folder, session["turns"])
+            if was_last:
+                self._set_pending_from_last(session)
+            self._write(session)
+            return session
+
+    def save_speech(self, session_id: str, index: int, data: bytes, natural: str | None = None) -> dict:
         name = f"turn-{index:02d}-speech.wav"
         if not _SPEECH.match(name):
             raise NotFound(session_id)
         with self._lock:
             session = self._read(session_id)
             turn = self._turn(session, index)
+            current = str((turn.get("feedback") or {}).get("natural") or "").strip()
+            if natural is not None and current != str(natural).strip():
+                return session
             (self._dir(session_id) / name).write_bytes(data)
             turn["speech_file"] = name
             turn["speech_mime"] = "audio/wav"
@@ -183,6 +326,61 @@ class SessionStore:
             if not path.is_file():
                 raise NotFound(session_id)
             return path, turn.get("mime_type") or "application/octet-stream"
+
+    def _delete_named_files(self, folder: Path, *names: str) -> None:
+        for name in names:
+            if not name or not (_AUDIO.match(name) or _SPEECH.match(name)):
+                continue
+            path = folder / name
+            if path.is_file():
+                path.unlink()
+
+    def _renumber_turns(self, folder: Path, turns: list[dict]) -> None:
+        turns.sort(key=lambda item: item.get("index") or 0)
+        staged = []
+        for new_index, turn in enumerate(turns, start=1):
+            old_index = turn.get("index")
+            planned = []
+            audio = turn.get("audio_file") or ""
+            if audio and _AUDIO.match(audio):
+                planned.append(("audio_file", audio, f"turn-{new_index:02d}{Path(audio).suffix}"))
+            speech = turn.get("speech_file") or ""
+            if speech and _SPEECH.match(speech):
+                planned.append(("speech_file", speech, f"turn-{new_index:02d}-speech.wav"))
+            moved = []
+            for field, old_name, new_name in planned:
+                if old_name == new_name:
+                    continue
+                src = folder / old_name
+                if not src.is_file():
+                    continue
+                tmp = folder / f".tmp-{old_index}-{old_name}"
+                src.rename(tmp)
+                moved.append((field, tmp, new_name))
+            staged.append((turn, new_index, moved))
+        for turn, new_index, moved in staged:
+            for field, tmp, new_name in moved:
+                dest = folder / new_name
+                if dest.exists():
+                    dest.unlink()
+                tmp.rename(dest)
+                turn[field] = new_name
+            turn["index"] = new_index
+
+    def _set_pending_from_last(self, session: dict) -> None:
+        turns = session.get("turns") or []
+        if not turns:
+            question = session["question"]
+            session["pending_prompt"] = {"en": question.get("en", ""), "zh": question.get("zh", "")}
+            return
+        last = turns[-1]
+        feedback = last.get("feedback") if isinstance(last.get("feedback"), dict) else {}
+        follow = str(feedback.get("follow_up") or "").strip()
+        if last.get("status") == "ready" and follow:
+            session["pending_prompt"] = {"en": follow, "zh": str(feedback.get("follow_up_zh") or "").strip()}
+            return
+        prompt = last.get("prompt") or session["question"]
+        session["pending_prompt"] = {"en": prompt.get("en", ""), "zh": prompt.get("zh", "")}
 
     def _dir(self, session_id: str) -> Path:
         if not _ID.match(session_id or ""):

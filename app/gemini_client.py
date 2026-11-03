@@ -55,6 +55,8 @@ def parse_feedback(text: str) -> dict:
         review = ""
     return {
         "natural": natural.strip(),
+        "natural_zh": str(data.get("natural_zh") or "").strip()[:500],
+        "spoken_zh": str(data.get("spoken_zh") or "").strip()[:500],
         "changes": changes[:12],
         "extensions": extensions[:3],
         "follow_up": str(data.get("follow_up") or "").strip(),
@@ -82,11 +84,17 @@ def answers_match(left: str, right: str) -> bool:
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.92
 
 
-def apply_review_policy(feedback: dict, transcript: str, previous_natural: str = "") -> dict:
+def apply_review_policy(
+    feedback: dict,
+    transcript: str,
+    previous_natural: str = "",
+    previous_natural_zh: str = "",
+) -> dict:
     """Drop the critique when the answer is already good, and don't rewrite a suggested answer again."""
     previous = (previous_natural or "").strip()
     if previous and answers_match(transcript, previous):
         feedback["natural"] = previous
+        feedback["natural_zh"] = (previous_natural_zh or "").strip()
         feedback["changes"] = []
         feedback["review"] = ""
     return feedback
@@ -254,6 +262,7 @@ class GeminiClient:
         prompt_zh: str,
         transcript: str,
         previous_natural: str = "",
+        previous_natural_zh: str = "",
     ) -> dict:
         _genai, types = _sdk()
         client = self._client_or_create()
@@ -289,7 +298,12 @@ class GeminiClient:
             text = _response_text(response)
             if not text:
                 raise GeminiError("这次没有生成反馈。录音已留下，可以点重试。")
-            return apply_review_policy(parse_feedback(text), transcript, previous_natural)
+            return apply_review_policy(
+                parse_feedback(text),
+                transcript,
+                previous_natural,
+                previous_natural_zh,
+            )
         raise GeminiError(_friendly(last_error) if last_error else "这次没有生成反馈。录音已留下，可以点重试。")
 
     def speak(self, text: str) -> bytes:

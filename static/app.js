@@ -12,6 +12,10 @@ const state = {
   startedAt: 0,
   timer: null,
   mimeType: "",
+  pending: null,
+  editingPrompt: null,
+  editingTurn: null,
+  retake: null,
 };
 
 let questionToken = 0;
@@ -24,8 +28,15 @@ const topicEl = document.getElementById("topic");
 const turnsEl = document.getElementById("turns");
 const nextEl = document.getElementById("next-prompt");
 const recordBtn = document.getElementById("record");
-const hintEl = document.getElementById("rec-hint");
 const newBtn = document.getElementById("new-question");
+const reviewEl = document.getElementById("take-review");
+const takeAudio = document.getElementById("take-audio");
+const sendTakeBtn = document.getElementById("send-take");
+const redoTakeBtn = document.getElementById("redo-take");
+const recorderEl = document.getElementById("recorder");
+const cancelRetakeBtn = document.getElementById("cancel-retake");
+const recHint = document.getElementById("rec-hint");
+const takeHint = document.getElementById("take-hint");
 
 function showBanner(text) {
   if (!text) {
@@ -70,11 +81,79 @@ function addLine(parent, className, text) {
   return p;
 }
 
-function renderPrompt(target, label, prompt) {
+function renderPrompt(target, label, prompt, kind) {
   target.replaceChildren();
   addLine(target, "kicker", label);
+  if (kind && state.editingPrompt === kind) {
+    target.appendChild(promptEditor(kind));
+    return;
+  }
   addLine(target, "en-line", prompt.en || "");
   if (prompt.zh) addLine(target, "zh-line", prompt.zh);
+  if (kind) target.appendChild(promptActions(kind));
+}
+
+function promptField(label, name, value, maxLength) {
+  const wrap = document.createElement("label");
+  wrap.textContent = label;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.name = name;
+  input.value = value || "";
+  input.required = true;
+  input.maxLength = maxLength || 240;
+  input.addEventListener("input", () => {
+    if (state.editDraft) state.editDraft[name] = input.value;
+  });
+  wrap.appendChild(input);
+  return wrap;
+}
+
+function promptEditor(kind) {
+  const draft = state.editDraft || { en: "", zh: "" };
+  const box = document.createElement("div");
+  box.className = "prompt-edit";
+  box.append(promptField("英文", "en", draft.en), promptField("中文", "zh", draft.zh));
+  const actions = document.createElement("div");
+  actions.className = "question-actions";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "primary";
+  save.dataset.promptSave = kind;
+  save.textContent = "保存";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "text-btn";
+  cancel.dataset.promptCancel = kind;
+  cancel.textContent = "取消";
+  actions.append(save, cancel);
+  box.appendChild(actions);
+  return box;
+}
+
+function promptActions(kind) {
+  const actions = document.createElement("div");
+  actions.className = "question-actions";
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "text-btn";
+  edit.dataset.promptEdit = kind;
+  edit.textContent = "修改";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "text-btn";
+  remove.dataset.promptDelete = kind;
+  remove.textContent = "删除";
+  actions.append(edit, remove);
+  return actions;
+}
+
+function beginPromptEdit(kind, prompt) {
+  state.editingTurn = null;
+  state.retake = null;
+  state.editingPrompt = kind;
+  state.editDraft = { en: (prompt && prompt.en) || "", zh: (prompt && prompt.zh) || "" };
+  renderPractice();
 }
 
 function renderTranscript(parent, turn) {
@@ -111,11 +190,15 @@ function renderSpeech(parent, turn) {
   const note = addLine(parent, "note", "正在准备发音…");
   const sessionId = state.session.id;
   const index = turn.index;
+  const natural = ((turn.feedback || {}).natural || "").trim();
   const key = `${sessionId}:${index}`;
   if (speechRequests.has(key)) return;
   const job = api(`/api/sessions/${sessionId}/turns/${index}/speech`, { method: "POST" })
     .then((session) => {
       if (!state.session || state.session.id !== sessionId) return;
+      const current = (state.session.turns || []).find((item) => item.index === index);
+      const still = ((current && current.feedback && current.feedback.natural) || "").trim();
+      if (still !== natural) return;
       state.session = session;
       if (!state.recording) renderPractice();
     })
@@ -126,15 +209,68 @@ function renderSpeech(parent, turn) {
   speechRequests.set(key, job);
 }
 
+function addMeaning(parent, text) {
+  const value = (text || "").trim();
+  if (value) addLine(parent, "meaning", value);
+}
+
+function turnActions(index) {
+  const actions = document.createElement("div");
+  actions.className = "question-actions";
+  const retake = document.createElement("button");
+  retake.type = "button";
+  retake.className = "text-btn";
+  retake.dataset.turnRetake = String(index);
+  retake.textContent = state.retake === index ? "取消重答" : "重答";
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "text-btn";
+  edit.dataset.turnEdit = String(index);
+  edit.textContent = "修改";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "text-btn";
+  remove.dataset.turnDelete = String(index);
+  remove.textContent = "删除";
+  actions.append(retake, edit, remove);
+  return actions;
+}
+
+function turnEditor() {
+  const draft = state.editDraft || {};
+  const box = document.createElement("div");
+  box.className = "prompt-edit";
+  box.append(promptField("问题英文", "en", draft.en), promptField("问题中文", "zh", draft.zh));
+  const actions = document.createElement("div");
+  actions.className = "question-actions";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "primary";
+  save.dataset.turnSave = String(state.editingTurn);
+  save.textContent = "保存";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "text-btn";
+  cancel.dataset.turnCancel = "1";
+  cancel.textContent = "取消";
+  actions.append(save, cancel);
+  box.appendChild(actions);
+  return box;
+}
+
 function renderTurn(turn) {
   const card = document.createElement("article");
   card.className = "card turn";
+  card.dataset.turn = String(turn.index);
+  if (state.retake === turn.index) card.classList.add("is-retake");
   addLine(card, "kicker", `第 ${turn.index} 段`);
-  if (turn.prompt && turn.prompt.en) addLine(card, "meta", `在回答：${turn.prompt.en}`);
+  card.appendChild(renderTurnQuestion(turn));
 
+  const feedback = turn.feedback || null;
   const said = document.createElement("div");
-  addLine(said, "block-label", "你说的");
+  addLine(said, "block-label", "原版");
   renderTranscript(said, turn);
+  if (feedback) addMeaning(said, feedback.spoken_zh);
   const seconds = turn.duration_ms ? ` · ${Math.round(turn.duration_ms / 1000)} 秒` : "";
   addLine(said, "meta", `${formatWhen(turn.created_at)}${seconds}`);
   const audio = document.createElement("audio");
@@ -154,12 +290,12 @@ function renderTurn(turn) {
     return card;
   }
 
-  const feedback = turn.feedback;
   if (!feedback) return card;
 
   const natural = document.createElement("div");
   addLine(natural, "block-label", "地道版");
   addLine(natural, "natural", feedback.natural || "");
+  addMeaning(natural, feedback.natural_zh);
   renderSpeech(natural, turn);
   card.appendChild(natural);
 
@@ -199,6 +335,25 @@ function renderTurn(turn) {
   return card;
 }
 
+function renderTurnQuestion(turn) {
+  const block = document.createElement("div");
+  block.className = "turn-question";
+  if (state.editingTurn === turn.index) {
+    block.appendChild(turnEditor());
+    return block;
+  }
+  const prompt = turn.prompt || {};
+  if (prompt.en) addLine(block, "en-line", prompt.en);
+  if (prompt.zh) addLine(block, "zh-line", prompt.zh);
+  if (state.retake === turn.index) addLine(block, "note", "接下来的录音会替换这一段，地道版会按新回答重写。");
+  block.appendChild(turnActions(turn.index));
+  const slot = document.createElement("div");
+  slot.className = "retake-slot";
+  slot.dataset.retakeSlot = String(turn.index);
+  block.appendChild(slot);
+  return block;
+}
+
 function renderReview(card, feedback) {
   const review = (feedback.review || "").trim();
   if (!review) return;
@@ -217,46 +372,112 @@ function renderPractice() {
   const turns = session ? session.turns || [] : [];
   if (session && turns.length) {
     topicEl.hidden = false;
-    renderPrompt(topicEl, "本题", session.question);
+    renderPrompt(topicEl, "本题", session.question, "question");
   } else {
     topicEl.hidden = true;
     topicEl.replaceChildren();
   }
 
+  if (recorderEl.parentElement !== practiceEl) practiceEl.appendChild(recorderEl);
   turnsEl.replaceChildren(...turns.map(renderTurn));
 
   if (!session) {
-    renderPrompt(nextEl, "现在回答", state.question || { en: "正在出题…", zh: "" });
+    renderPrompt(nextEl, "现在回答", state.question || { en: "正在出题…", zh: "" }, state.question ? "question" : null);
   } else if (!turns.length) {
-    renderPrompt(nextEl, "现在回答", session.pending_prompt);
+    renderPrompt(nextEl, "现在回答", session.pending_prompt, "question");
   } else {
     const last = turns[turns.length - 1];
     const pending = session.pending_prompt || last.prompt;
     const isNew = pending.en && pending.en !== last.prompt.en;
-    if (isNew) renderPrompt(nextEl, "追问", pending);
+    if (isNew) renderPrompt(nextEl, "追问", pending, "follow");
     else if (last.status === "error") renderPrompt(nextEl, "再答一次", pending);
-    else {
-      nextEl.replaceChildren();
-      addLine(nextEl, "kicker", "追问");
-      addLine(nextEl, "note", "这次没有新的追问。可以换一题，也可以再录一段。");
-    }
+    else renderEmptyFollow();
   }
+  parkRecorder();
+  syncControls();
+}
+
+function parkRecorder() {
+  const slot = state.retake == null ? null : turnsEl.querySelector(`[data-retake-slot="${state.retake}"]`);
+  if (slot) {
+    slot.appendChild(recorderEl);
+    recorderEl.classList.add("is-inline");
+  } else if (recorderEl.previousElementSibling !== nextEl) {
+    nextEl.insertAdjacentElement("afterend", recorderEl);
+    recorderEl.classList.remove("is-inline");
+  } else {
+    recorderEl.classList.remove("is-inline");
+  }
+  newBtn.hidden = state.retake != null;
+}
+
+function renderEmptyFollow() {
+  nextEl.replaceChildren();
+  addLine(nextEl, "kicker", "追问");
+  if (state.editingPrompt === "follow") {
+    nextEl.appendChild(promptEditor("follow"));
+    return;
+  }
+  addLine(nextEl, "note", "这次没有新的追问。可以自己写一句，也可以换一题或再录一段。");
+  const write = document.createElement("button");
+  write.type = "button";
+  write.className = "text-btn";
+  write.dataset.promptEdit = "follow";
+  write.dataset.promptBlank = "1";
+  write.textContent = "写一句追问";
+  nextEl.appendChild(write);
+}
+
+function clearPending() {
+  if (state.pending && state.pending.url) URL.revokeObjectURL(state.pending.url);
+  state.pending = null;
+  takeAudio.removeAttribute("src");
+  takeAudio.load();
+}
+
+function holdTake(blob, durationMs) {
+  clearPending();
+  const url = URL.createObjectURL(blob);
+  state.pending = { blob, durationMs, url };
+  takeAudio.src = url;
+  showBanner("");
+  syncControls();
+}
+
+function discardTake() {
+  clearPending();
   syncControls();
 }
 
 function syncControls() {
-  recordBtn.disabled = state.busy;
-  newBtn.disabled = state.busy || state.recording;
+  const reviewing = Boolean(state.pending) && !state.busy;
+  recordBtn.hidden = reviewing;
+  reviewEl.hidden = !reviewing;
+  recordBtn.disabled = state.busy || Boolean(state.editingPrompt) || state.editingTurn != null;
+  cancelRetakeBtn.hidden = state.retake == null || state.recording || state.busy;
+  document.querySelectorAll("[data-prompt-edit], [data-prompt-delete], [data-prompt-save], [data-turn-edit], [data-turn-delete], [data-turn-save], [data-turn-retake]").forEach((button) => {
+    button.disabled = state.busy || state.recording || Boolean(state.pending);
+  });
+  sendTakeBtn.disabled = state.busy;
+  redoTakeBtn.disabled = state.busy;
+  newBtn.disabled = state.busy || state.recording || Boolean(state.pending);
   recordBtn.classList.toggle("is-recording", state.recording);
   if (state.busy) {
     recordBtn.textContent = "正在转写，并生成反馈…";
     return;
   }
+  const retakeLabel = state.retake != null ? `重答第 ${state.retake} 段` : "开始说";
+  recHint.textContent = state.retake != null
+    ? `正在重答第 ${state.retake} 段。点一下开始，说完再点一下。送出后这一段的原版和地道版都会按新回答重写。`
+    : "点一下开始，说完再点一下。听完再决定要不要送出。中文卡住了就直接说中文。最长 3 分钟。";
+  takeHint.textContent = state.retake != null
+    ? `听一遍。送出后会替换第 ${state.retake} 段，地道版也会重写。`
+    : "这段还在本机。听一遍，满意再送出。";
   if (state.recording) {
     recordBtn.textContent = `说完了 ${formatClock(Date.now() - state.startedAt)}`;
     return;
   }
-  recordBtn.textContent = "开始说";
+  recordBtn.textContent = retakeLabel;
 }
 
 function activate(tab) {
@@ -303,13 +524,45 @@ async function showHistory() {
   }
 }
 
+async function rememberPractice(body) {
+  await api("/api/practice", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 async function pickQuestion(exclude) {
+  state.editingPrompt = null;
+  state.editingTurn = null;
+  state.retake = null;
+  discardTake();
   const token = ++questionToken;
   try {
     const question = await api("/api/questions/next" + (exclude ? `?exclude=${encodeURIComponent(exclude)}` : ""));
     if (token !== questionToken) return;
+    await rememberPractice({ question_id: question.id });
+    if (token !== questionToken) return;
     state.question = question;
     state.session = null;
+    renderPractice();
+  } catch (error) {
+    showBanner(error.message);
+  }
+}
+
+async function restorePractice() {
+  const token = ++questionToken;
+  try {
+    const practice = await api("/api/practice");
+    if (token !== questionToken) return;
+    if (practice.session) {
+      state.session = practice.session;
+      state.question = null;
+    } else {
+      state.session = null;
+      state.question = practice.question;
+    }
     renderPractice();
   } catch (error) {
     showBanner(error.message);
@@ -332,16 +585,28 @@ async function uploadTake(blob, durationMs) {
   form.append("audio", blob, `take.${ext}`);
   form.append("mime_type", blob.type || "audio/webm");
   form.append("duration_ms", String(durationMs));
-  if (state.session) form.append("session_id", state.session.id);
+  const retake = state.retake;
+  let path = "/api/turns";
+  if (retake != null) {
+    if (!state.session) {
+      showBanner("找不到要替换的这段。");
+      return;
+    }
+    path = `/api/sessions/${state.session.id}/turns/${retake}/retake`;
+  } else if (state.session) form.append("session_id", state.session.id);
   else if (state.question) form.append("question_id", state.question.id);
   state.busy = true;
   syncControls();
   try {
-    state.session = await api("/api/turns", { method: "POST", body: form });
+    state.session = await api(path, { method: "POST", body: form });
+    if (retake != null) speechRequests.delete(`${state.session.id}:${retake}`);
+    state.retake = null;
+    clearPending();
     state.question = null;
     showBanner("");
     renderPractice();
-    document.getElementById("recorder").scrollIntoView({ behavior: "smooth", block: "center" });
+    if (retake == null) recorderEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    else turnsEl.querySelector(`[data-turn="${retake}"]`)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (error) {
     showBanner(error.message);
   } finally {
@@ -351,7 +616,7 @@ async function uploadTake(blob, durationMs) {
 }
 
 async function startRecording() {
-  if (state.busy || state.recording) return;
+  if (state.busy || state.recording || state.pending || state.editingPrompt || state.editingTurn != null) return;
   if (!state.session && !state.question) {
     showBanner("题目还没准备好。");
     return;
@@ -386,7 +651,7 @@ async function startRecording() {
       showBanner("录音太短了，再说长一点。");
       return;
     }
-    uploadTake(blob, durationMs);
+    holdTake(blob, durationMs);
   };
   state.recorder.start();
   state.recording = true;
@@ -419,9 +684,215 @@ async function retry(index) {
   }
 }
 
+function askConfirm(message) {
+  const root = document.getElementById("confirm-dialog");
+  const text = document.getElementById("confirm-text");
+  const ok = document.getElementById("confirm-ok");
+  const cancel = document.getElementById("confirm-cancel");
+  text.textContent = message;
+  root.hidden = false;
+  cancel.focus();
+  return new Promise((resolve) => {
+    function finish(value) {
+      root.hidden = true;
+      ok.removeEventListener("click", onOk);
+      cancel.removeEventListener("click", onCancel);
+      root.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey);
+      resolve(value);
+    }
+    function onOk() { finish(true); }
+    function onCancel() { finish(false); }
+    function onBackdrop(event) {
+      if (event.target === root) finish(false);
+    }
+    function onKey(event) {
+      if (event.key === "Escape") finish(false);
+    }
+    ok.addEventListener("click", onOk);
+    cancel.addEventListener("click", onCancel);
+    root.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey);
+  });
+}
+
+window.quickbackConfirm = askConfirm;
+
+function promptBody(card) {
+  return {
+    en: card.querySelector('[name="en"]').value,
+    zh: card.querySelector('[name="zh"]').value,
+  };
+}
+
+practiceEl.addEventListener("click", async (event) => {
+  const edit = event.target.closest("[data-prompt-edit]");
+  const save = event.target.closest("[data-prompt-save]");
+  const cancel = event.target.closest("[data-prompt-cancel]");
+  const remove = event.target.closest("[data-prompt-delete]");
+  const turnEdit = event.target.closest("[data-turn-edit]");
+  const turnSave = event.target.closest("[data-turn-save]");
+  const turnCancel = event.target.closest("[data-turn-cancel]");
+  const turnDelete = event.target.closest("[data-turn-delete]");
+  const turnRetake = event.target.closest("[data-turn-retake]");
+  if (!edit && !save && !cancel && !remove && !turnEdit && !turnSave && !turnCancel && !turnDelete && !turnRetake) return;
+  if (state.recording || state.busy || state.pending) return;
+  if (turnRetake) {
+    beginRetake(Number(turnRetake.dataset.turnRetake));
+    return;
+  }
+  if (turnCancel) {
+    state.editingTurn = null;
+    renderPractice();
+    return;
+  }
+  if (turnEdit) {
+    beginTurnEdit(Number(turnEdit.dataset.turnEdit));
+    return;
+  }
+  try {
+    if (turnSave) await saveTurn();
+    else if (turnDelete) await deleteTurn(Number(turnDelete.dataset.turnDelete));
+  } catch (error) {
+    showBanner(error.message);
+    return;
+  }
+  if (turnSave || turnDelete) return;
+  if (cancel) {
+    state.editingPrompt = null;
+    renderPractice();
+    return;
+  }
+  if (edit) {
+    const kind = edit.dataset.promptEdit;
+    const prompt = edit.dataset.promptBlank ? { en: "", zh: "" } : currentPrompt(kind);
+    beginPromptEdit(kind, prompt);
+    return;
+  }
+  const card = event.target.closest(".card");
+  try {
+    if (save) await savePrompt(save.dataset.promptSave, card);
+    else await deletePrompt(remove.dataset.promptDelete);
+  } catch (error) {
+    showBanner(error.message);
+  }
+});
+
+function beginRetake(index) {
+  const turn = ((state.session && state.session.turns) || []).find((item) => item.index === index);
+  if (!turn) return;
+  discardTake();
+  state.editingPrompt = null;
+  state.editingTurn = null;
+  state.retake = state.retake === index ? null : index;
+  showBanner("");
+  renderPractice();
+  if (state.retake != null) recorderEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function beginTurnEdit(index) {
+  const turn = ((state.session && state.session.turns) || []).find((item) => item.index === index);
+  if (!turn) return;
+  state.editingPrompt = null;
+  state.retake = null;
+  state.editingTurn = index;
+  state.editDraft = {
+    en: (turn.prompt && turn.prompt.en) || "",
+    zh: (turn.prompt && turn.prompt.zh) || "",
+  };
+  renderPractice();
+}
+
+async function saveTurn() {
+  const draft = state.editDraft || {};
+  const body = { en: draft.en, zh: draft.zh };
+  state.session = await api(`/api/sessions/${state.session.id}/turns/${state.editingTurn}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  state.editingTurn = null;
+  showBanner("");
+  renderPractice();
+}
+
+async function deleteTurn(index) {
+  if (!await askConfirm("删掉这一段回答？录音也会一起删掉。")) return;
+  state.session = await api(`/api/sessions/${state.session.id}/turns/${index}`, { method: "DELETE" });
+  state.editingTurn = null;
+  state.retake = null;
+  showBanner("");
+  renderPractice();
+}
+
+function currentPrompt(kind) {
+  if (kind === "follow") return (state.session && state.session.pending_prompt) || { en: "", zh: "" };
+  if (state.session) return state.session.question;
+  return state.question || { en: "", zh: "" };
+}
+
+async function savePrompt(kind, card) {
+  const body = JSON.stringify(promptBody(card));
+  const options = { method: "PUT", headers: { "Content-Type": "application/json" }, body };
+  if (kind === "question" && state.session) {
+    state.session = await api(`/api/sessions/${state.session.id}/question`, options);
+  } else if (kind === "question") {
+    state.question = await api(`/api/questions/${state.question.id}`, options);
+  } else {
+    state.session = await api(`/api/sessions/${state.session.id}/follow-up`, options);
+  }
+  state.editingPrompt = null;
+  showBanner("");
+  renderPractice();
+}
+
+async function deletePrompt(kind) {
+  if (kind === "follow") {
+    if (!await askConfirm("删掉这句追问？")) return;
+    state.session = await api(`/api/sessions/${state.session.id}/follow-up`, { method: "DELETE" });
+    state.editingPrompt = null;
+    showBanner("");
+    renderPractice();
+    return;
+  }
+  if (!await askConfirm("从题库删掉这道题？已经练过的记录还会留着。")) return;
+  const id = state.session ? state.session.question.id : state.question.id;
+  await api(`/api/questions/${id}`, { method: "DELETE" });
+  const hasTurns = state.session && (state.session.turns || []).length;
+  state.editingPrompt = null;
+  if (hasTurns) {
+    showBanner("这道题已从题库删掉。这次练习还留着。");
+    renderPractice();
+    return;
+  }
+  state.session = null;
+  state.question = null;
+  showBanner("");
+  await pickQuestion(id);
+}
+
 recordBtn.addEventListener("click", () => {
   if (state.recording) stopRecording();
   else startRecording();
+});
+
+sendTakeBtn.addEventListener("click", () => {
+  if (!state.pending || state.busy) return;
+  uploadTake(state.pending.blob, state.pending.durationMs);
+});
+
+redoTakeBtn.addEventListener("click", () => {
+  if (state.busy) return;
+  discardTake();
+  showBanner("");
+});
+
+cancelRetakeBtn.addEventListener("click", () => {
+  if (state.recording || state.busy) return;
+  state.retake = null;
+  discardTake();
+  showBanner("");
+  renderPractice();
 });
 
 newBtn.addEventListener("click", () => {
@@ -453,8 +924,13 @@ document.getElementById("history-list").addEventListener("click", async (event) 
   if (!button) return;
   try {
     questionToken += 1;
+    state.editingPrompt = null;
+    state.editingTurn = null;
+    state.retake = null;
+    discardTake();
     state.session = await api(`/api/sessions/${button.dataset.session}`);
     state.question = null;
+    await rememberPractice({ session_id: state.session.id });
     showPractice();
     renderPractice();
   } catch (error) {
@@ -473,7 +949,7 @@ async function init() {
     showBanner(error.message);
   }
   renderPractice();
-  pickQuestion(null);
+  restorePractice();
 }
 
 init();

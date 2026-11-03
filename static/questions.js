@@ -4,6 +4,30 @@
   let api = null;
   let report = null;
   let editingId = null;
+  let currentId = "";
+
+  function formatWhen(iso) {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "—";
+    const hh = String(date.getHours()).padStart(2, "0");
+    const mm = String(date.getMinutes()).padStart(2, "0");
+    return `${date.getMonth() + 1}月${date.getDate()}日 ${hh}:${mm}`;
+  }
+
+  function metaLine(question) {
+    const line = document.createElement("p");
+    line.className = "question-meta";
+    if (question.id === currentId) {
+      const mark = document.createElement("span");
+      mark.className = "question-current";
+      mark.textContent = "当前";
+      line.append(mark, document.createTextNode(" · "));
+    }
+    const created = formatWhen(question.created_at);
+    const updated = formatWhen(question.updated_at);
+    line.append(document.createTextNode(`创建 ${created} · 修改 ${updated}`));
+    return line;
+  }
 
   function field(label, name, value) {
     const wrap = document.createElement("label");
@@ -24,6 +48,7 @@
       const card = document.createElement("article");
       card.className = "card question-item";
       card.dataset.id = question.id;
+      card.appendChild(metaLine(question));
       if (editingId === question.id) {
         card.append(field("英文问题", "en", question.en), field("中文意思", "zh", question.zh));
         const actions = document.createElement("div");
@@ -68,6 +93,13 @@
 
   async function reload() {
     const questions = await api("/api/questions");
+    try {
+      const practice = await api("/api/practice");
+      const sessionQuestion = practice.session && practice.session.question;
+      currentId = (sessionQuestion && sessionQuestion.id) || (practice.question && practice.question.id) || "";
+    } catch (error) {
+      currentId = "";
+    }
     render(questions);
   }
 
@@ -120,7 +152,8 @@
         return;
       }
       if (remove) {
-        if (!window.confirm("删掉这道题？已经练过的记录还会留着。")) return;
+        const ask = window.quickbackConfirm || ((text) => Promise.resolve(window.confirm(text)));
+        if (!await ask("删掉这道题？已经练过的记录还会留着。")) return;
         await api(`/api/questions/${remove.dataset.delete}`, { method: "DELETE" });
         if (editingId === remove.dataset.delete) editingId = null;
         report("");
