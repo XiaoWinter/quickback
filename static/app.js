@@ -16,6 +16,8 @@ const state = {
   editingPrompt: null,
   editingTurn: null,
   retake: null,
+  retell: null,
+  retellNote: null,
 };
 
 let questionToken = 0;
@@ -233,6 +235,31 @@ function renderSpeech(parent, turn) {
   speechRequests.set(key, job);
 }
 
+function renderRetell(parent, turn) {
+  const block = document.createElement("div");
+  block.className = "retell";
+  addLine(block, "block-label", "再说一遍");
+  if (turn.retell_file) {
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.preload = "metadata";
+    audio.src = mediaSrc("retell", turn);
+    block.appendChild(audio);
+  } else {
+    addLine(block, "note", "照着上面的地道版说一遍。这段只留在本机，不会另写一版。");
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "text-btn";
+  button.dataset.retell = String(turn.index);
+  button.dataset.retellHas = turn.retell_file ? "1" : "0";
+  button.textContent = turn.retell_file ? "再录一次" : "再说一遍";
+  block.appendChild(button);
+  const note = state.retellNote;
+  if (note && note.index === turn.index) addLine(block, "error-line", note.message);
+  parent.appendChild(block);
+}
+
 function addMeaning(parent, text) {
   const value = (text || "").trim();
   if (value) addLine(parent, "meaning", value);
@@ -321,6 +348,7 @@ function renderTurn(turn) {
   addLine(natural, "natural", feedback.natural || "");
   addMeaning(natural, feedback.natural_zh);
   renderSpeech(natural, turn);
+  renderRetell(natural, turn);
   card.appendChild(natural);
 
   const edits = document.createElement("div");
@@ -477,10 +505,17 @@ function syncControls() {
   const reviewing = Boolean(state.pending) && !state.busy;
   recordBtn.hidden = reviewing;
   reviewEl.hidden = !reviewing;
-  recordBtn.disabled = state.busy || Boolean(state.editingPrompt) || state.editingTurn != null;
+  recordBtn.disabled = state.busy || Boolean(state.editingPrompt) || state.editingTurn != null || state.retell != null;
   cancelRetakeBtn.hidden = state.retake == null || state.recording || state.busy;
   document.querySelectorAll("[data-prompt-edit], [data-prompt-delete], [data-prompt-save], [data-turn-edit], [data-turn-delete], [data-turn-save], [data-turn-retake]").forEach((button) => {
     button.disabled = state.busy || state.recording || Boolean(state.pending);
+  });
+  document.querySelectorAll("[data-retell]").forEach((button) => {
+    const active = state.retell === Number(button.dataset.retell) && state.recording;
+    button.disabled = state.busy || Boolean(state.pending) || (state.recording && !active);
+    button.textContent = active
+      ? `说完了 ${formatClock(Date.now() - state.startedAt)}`
+      : (button.dataset.retellHas === "1" ? "再录一次" : "再说一遍");
   });
   sendTakeBtn.disabled = state.busy;
   redoTakeBtn.disabled = state.busy;
@@ -640,22 +675,51 @@ async function uploadTake(blob, durationMs) {
   }
 }
 
-async function startRecording() {
-  if (state.busy || state.recording || state.pending || state.editingPrompt || state.editingTurn != null) return;
+function recordingBlock() {
+  const onThisComputer = location.hostname === "127.0.0.1" || location.hostname === "localhost";
+  if (!window.isSecureContext || !navigator.mediaDevices) {
+    if (onThisComputer) return "这个浏览器不能录音。请用 Chrome 或 Edge 打开。";
+    return "这个地址不能录音。请改用 http://127.0.0.1:8765 打开。";
+  }
+  if (!window.MediaRecorder) return "这个浏览器不能录音。请用 Chrome 或 Edge 打开。";
+  return "";
+}
+
+async function startRecording(retellIndex) {
+  const echoing = Number.isInteger(retellIndex);
+  const fail = (message) => {
+    if (echoing) {
+      state.retellNote = { index: retellIndex, message };
+      renderPractice();
+    }
+    showBanner(message);
+  };
+  if (state.busy || state.recording || state.pending || state.editingPrompt || state.editingTurn != null) {
+    if (!echoing) return;
+    if (state.pending) fail("上一段录音还没送出。先点上面的「就用这段」或「重说」。");
+    else if (state.recording) fail("先说完正在录的这一段。");
+    return;
+  }
+  if (echoing && !state.session) {
+    fail("先有一段回答，才能跟读。");
+    return;
+  }
   if (!state.session && !state.question) {
     showBanner("题目还没准备好。");
     return;
   }
-  if (!navigator.mediaDevices || !window.MediaRecorder) {
-    showBanner("这个浏览器不能录音。请用 Chrome 或 Edge 打开。");
+  const blocked = recordingBlock();
+  if (blocked) {
+    fail(blocked);
     return;
   }
   try {
     state.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (error) {
-    showBanner("没有拿到麦克风权限。");
+    fail("没有拿到麦克风权限。");
     return;
   }
+  state.retellNote = null;
   const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
   state.mimeType = candidates.find((item) => MediaRecorder.isTypeSupported(item)) || "";
   state.chunks = [];
@@ -665,15 +729,25 @@ async function startRecording() {
   state.recorder.ondataavailable = (event) => {
     if (event.data.size) state.chunks.push(event.data);
   };
+  state.retell = echoing ? retellIndex : null;
   state.recorder.onstop = () => {
     const durationMs = Date.now() - state.startedAt;
+    const echo = state.retell;
     const blob = new Blob(state.chunks, { type: state.recorder.mimeType || state.mimeType || "audio/webm" });
     stopStream();
     state.recording = false;
+    state.retell = null;
     stopTimer();
     syncControls();
     if (durationMs < 400 || blob.size < 400) {
-      showBanner("录音太短了，再说长一点。");
+      const message = "录音太短了，再说长一点。";
+      if (echo != null) state.retellNote = { index: echo, message };
+      showBanner(message);
+      renderPractice();
+      return;
+    }
+    if (echo != null) {
+      uploadRetell(echo, blob);
       return;
     }
     holdTake(blob, durationMs);
@@ -687,6 +761,28 @@ async function startRecording() {
     syncControls();
     if (Date.now() - state.startedAt >= MAX_MS) stopRecording();
   }, 250);
+}
+
+async function uploadRetell(index, blob) {
+  if (!state.session) return;
+  const form = new FormData();
+  form.append("audio", blob, "retell.webm");
+  form.append("mime_type", blob.type || "audio/webm");
+  state.busy = true;
+  syncControls();
+  try {
+    state.session = await api(`/api/sessions/${state.session.id}/turns/${index}/retell`, {
+      method: "POST",
+      body: form,
+    });
+    showBanner("");
+    renderPractice();
+  } catch (error) {
+    showBanner(error.message);
+  } finally {
+    state.busy = false;
+    syncControls();
+  }
 }
 
 function stopRecording() {
@@ -963,6 +1059,15 @@ document.getElementById("tab-questions").addEventListener("click", showQuestions
 turnsEl.addEventListener("click", (event) => {
   const button = event.target.closest("[data-retry]");
   if (button) retry(Number(button.dataset.retry));
+  const retell = event.target.closest("[data-retell]");
+  if (!retell) return;
+  const index = Number(retell.dataset.retell);
+  if (state.recording && state.retell === index) {
+    stopRecording();
+    return;
+  }
+  if (state.recording) return;
+  startRecording(index);
 });
 
 document.getElementById("history-list").addEventListener("click", async (event) => {
@@ -973,6 +1078,7 @@ document.getElementById("history-list").addEventListener("click", async (event) 
     state.editingPrompt = null;
     state.editingTurn = null;
     state.retake = null;
+    state.retell = null;
     discardTake();
     state.session = await api(`/api/sessions/${button.dataset.session}`);
     state.question = null;

@@ -6,6 +6,7 @@
   let answer = null;
   let editingId = null;
   let currentId = "";
+  const openEchoes = new Set();
 
   function formatWhen(iso) {
     const date = new Date(iso);
@@ -91,10 +92,109 @@
         remove.dataset.delete = question.id;
         remove.textContent = "删除";
         actions.append(use, edit, remove);
-        card.append(en, zh, actions);
+        card.append(en, zh, actions, echoPanel(question.id));
       }
       list.appendChild(card);
     });
+  }
+
+  function echoPanel(questionId) {
+    const details = document.createElement("details");
+    details.className = "echoes";
+    if (openEchoes.has(questionId)) details.open = true;
+    const summary = document.createElement("summary");
+    summary.textContent = "跟读";
+    const body = document.createElement("div");
+    body.className = "echo-list";
+    details.append(summary, body);
+    details.addEventListener("toggle", () => {
+      if (details.open) {
+        openEchoes.add(questionId);
+        loadEchoes(questionId, body);
+      } else {
+        openEchoes.delete(questionId);
+      }
+    });
+    if (details.open) loadEchoes(questionId, body);
+    return details;
+  }
+
+  function audioLine(src) {
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.preload = "none";
+    audio.src = src;
+    return audio;
+  }
+
+  async function loadEchoes(questionId, body) {
+    body.replaceChildren();
+    const waiting = document.createElement("p");
+    waiting.className = "note";
+    waiting.textContent = "正在读取…";
+    body.appendChild(waiting);
+    try {
+      const lines = await api(`/api/questions/${questionId}/echoes`);
+      body.replaceChildren();
+      if (!lines.length) {
+        const empty = document.createElement("p");
+        empty.className = "note";
+        empty.textContent = "这道题还没有地道版。";
+        body.appendChild(empty);
+        return;
+      }
+      lines.forEach((line) => {
+        const item = document.createElement("div");
+        item.className = "echo";
+        if (line.prompt_en) {
+          const en = document.createElement("p");
+          en.className = "en-line";
+          en.textContent = line.prompt_en;
+          item.appendChild(en);
+        }
+        if (line.prompt_zh) {
+          const asked = document.createElement("p");
+          asked.className = "zh-line";
+          asked.textContent = line.prompt_zh;
+          item.appendChild(asked);
+        }
+        const natural = document.createElement("p");
+        natural.className = "natural";
+        natural.textContent = line.natural;
+        item.appendChild(natural);
+        if (line.natural_zh) {
+          const zh = document.createElement("p");
+          zh.className = "meaning";
+          zh.textContent = line.natural_zh;
+          item.appendChild(zh);
+        }
+        if (line.has_speech) {
+          const label = document.createElement("p");
+          label.className = "block-label";
+          label.textContent = "地道版";
+          item.append(label, audioLine(`/api/sessions/${line.session_id}/speech/${line.index}`));
+        }
+        const retellLabel = document.createElement("p");
+        retellLabel.className = "block-label";
+        retellLabel.textContent = "复述";
+        item.appendChild(retellLabel);
+        if (line.has_retell) {
+          item.appendChild(audioLine(`/api/sessions/${line.session_id}/retell/${line.index}`));
+        } else {
+          const missing = document.createElement("p");
+          missing.className = "note";
+          missing.textContent = "还没有复述。在练习页的地道版下面说一遍。";
+          item.appendChild(missing);
+        }
+        body.appendChild(item);
+      });
+    } catch (error) {
+      body.replaceChildren();
+      const failed = document.createElement("p");
+      failed.className = "note";
+      failed.textContent = error.message;
+      body.appendChild(failed);
+    }
   }
 
   async function reload() {

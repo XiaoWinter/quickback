@@ -8,6 +8,7 @@ from pathlib import Path
 _ID = re.compile(r"^[a-f0-9]{32}$")
 _AUDIO = re.compile(r"^turn-\d{2}\.[A-Za-z0-9]{1,5}$")
 _SPEECH = re.compile(r"^turn-\d{2}-speech\.wav$")
+_RETELL = re.compile(r"^turn-\d{2}-retell\.[A-Za-z0-9]{1,5}$")
 
 EXT_BY_MIME = {
     "audio/webm": ".webm",
@@ -163,7 +164,7 @@ class SessionStore:
             (folder / filename).write_bytes(data)
             if old_audio and old_audio != filename:
                 self._delete_named_files(folder, old_audio)
-            self._delete_named_files(folder, turn.get("speech_file"))
+            self._delete_named_files(folder, turn.get("speech_file"), turn.get("retell_file"))
             turn["created_at"] = now_iso()
             turn["duration_ms"] = duration_ms
             turn["audio_file"] = filename
@@ -176,6 +177,8 @@ class SessionStore:
             turn.pop("speech_file", None)
             turn.pop("speech_mime", None)
             turn.pop("speech_error", None)
+            turn.pop("retell_file", None)
+            turn.pop("retell_mime", None)
             if session["turns"][-1]["index"] == index:
                 prompt = turn.get("prompt") or session["question"]
                 session["pending_prompt"] = {"en": prompt.get("en", ""), "zh": prompt.get("zh", "")}
@@ -186,7 +189,17 @@ class SessionStore:
         with self._lock:
             session = self._read(session_id)
             turn = self._turn(session, index)
+            old_natural = ""
+            old_feedback = turn.get("feedback")
+            if isinstance(old_feedback, dict):
+                old_natural = str(old_feedback.get("natural") or "").strip()
             turn.update(fields)
+            new_feedback = turn.get("feedback")
+            new_natural = str(new_feedback.get("natural") or "").strip() if isinstance(new_feedback, dict) else ""
+            if old_natural and new_natural and old_natural != new_natural:
+                self._delete_named_files(self._dir(session_id), turn.get("retell_file"))
+                turn.pop("retell_file", None)
+                turn.pop("retell_mime", None)
             feedback = turn.get("feedback") or {}
             follow = str(feedback.get("follow_up") or "").strip()
             follow_zh = str(feedback.get("follow_up_zh") or "").strip()
@@ -278,13 +291,90 @@ class SessionStore:
             turn = self._turn(session, index)
             folder = self._dir(session_id)
             was_last = session["turns"][-1]["index"] == index
-            self._delete_named_files(folder, turn.get("audio_file"), turn.get("speech_file"))
+            self._delete_named_files(folder, turn.get("audio_file"), turn.get("speech_file"), turn.get("retell_file"))
             session["turns"] = [item for item in session["turns"] if item.get("index") != index]
             self._renumber_turns(folder, session["turns"])
             if was_last:
                 self._set_pending_from_last(session)
             self._write(session)
             return session
+
+    def save_retell(self, session_id: str, index: int, data: bytes, mime: str) -> dict:
+        mime = normalize_mime(mime)
+        ext = EXT_BY_MIME.get(mime)
+        if not ext:
+            raise StorageError("这段录音的格式不支持。")
+        name = f"turn-{index:02d}-retell{ext}"
+        if not _RETELL.match(name):
+            raise StorageError("这段录音的格式不支持。")
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            natural = str(((turn.get("feedback") or {}).get("natural") or "")).strip()
+            if turn.get("status") != "ready" or not natural:
+                raise StorageError("还没有地道版，不能复述。")
+            folder = self._dir(session_id)
+            old = turn.get("retell_file") or ""
+            (folder / name).write_bytes(data)
+            if old and old != name:
+                self._delete_named_files(folder, old)
+            turn["retell_file"] = name
+            turn["retell_mime"] = mime
+            self._write(session)
+            return session
+
+    def retell_path(self, session_id: str, index: int) -> tuple[Path, str]:
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            name = turn.get("retell_file") or ""
+            if not _RETELL.match(name):
+                raise NotFound(session_id)
+            path = self._dir(session_id) / name
+            if not path.is_file():
+                raise NotFound(session_id)
+            return path, turn.get("retell_mime") or "application/octet-stream"
+
+    def echoes_for_question(self, question_id: str) -> list[dict]:
+        lines = []
+        with self._lock:
+            if not self.root.exists():
+                return []
+            for folder in self.root.iterdir():
+                path = folder / "session.json"
+                if not path.is_file():
+                    continue
+                try:
+                    session = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                question = session.get("question") or {}
+                if question.get("id") != question_id:
+                    continue
+                for turn in session.get("turns") or []:
+                    feedback = turn.get("feedback") if isinstance(turn.get("feedback"), dict) else {}
+                    natural = str(feedback.get("natural") or "").strip()
+                    if turn.get("status") != "ready" or not natural:
+                        continue
+                    speech = turn.get("speech_file") or ""
+                    retell = turn.get("retell_file") or ""
+                    prompt = turn.get("prompt") or {}
+                    lines.append(
+                        {
+                            "session_id": session.get("id"),
+                            "index": turn.get("index"),
+                            "created_at": turn.get("created_at") or "",
+                            "session_at": session.get("created_at") or "",
+                            "prompt_en": str(prompt.get("en") or "").strip(),
+                            "prompt_zh": str(prompt.get("zh") or "").strip(),
+                            "natural": natural,
+                            "natural_zh": str(feedback.get("natural_zh") or "").strip(),
+                            "has_speech": bool(_SPEECH.match(speech) and (folder / speech).is_file()),
+                            "has_retell": bool(_RETELL.match(retell) and (folder / retell).is_file()),
+                        }
+                    )
+        lines.sort(key=lambda item: (item.get("session_at") or "", item.get("index") or 0))
+        return lines
 
     def drop_speech(self, session_id: str, index: int) -> dict:
         with self._lock:
@@ -359,7 +449,7 @@ class SessionStore:
 
     def _delete_named_files(self, folder: Path, *names: str) -> None:
         for name in names:
-            if not name or not (_AUDIO.match(name) or _SPEECH.match(name)):
+            if not name or not (_AUDIO.match(name) or _SPEECH.match(name) or _RETELL.match(name)):
                 continue
             path = folder / name
             if path.is_file():
@@ -377,6 +467,9 @@ class SessionStore:
             speech = turn.get("speech_file") or ""
             if speech and _SPEECH.match(speech):
                 planned.append(("speech_file", speech, f"turn-{new_index:02d}-speech.wav"))
+            retell = turn.get("retell_file") or ""
+            if retell and _RETELL.match(retell):
+                planned.append(("retell_file", retell, f"turn-{new_index:02d}-retell{Path(retell).suffix}"))
             moved = []
             for field, old_name, new_name in planned:
                 if old_name == new_name:

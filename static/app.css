@@ -218,7 +218,7 @@ audio { width: 100%; margin-top: 0.35rem; }
 
 .record:disabled { opacity: 0.55; cursor: wait; }
 
-.take-review {
+.take-review:not([hidden]) {
   width: min(100%, 24rem);
   display: grid;
   justify-items: center;
@@ -288,6 +288,14 @@ audio { width: 100%; margin-top: 0.35rem; }
 }
 
 .question-current { color: var(--en); font-weight: 650; }
+.retell { margin-top: 0.8rem; }
+.retell .text-btn { margin-top: 0.35rem; }
+
+.echoes { margin-top: 0.8rem; }
+.echoes summary { cursor: pointer; color: var(--muted); }
+.echo { margin-top: 0.85rem; }
+.echo .block-label { margin-top: 0.45rem; }
+
 .question-actions { display: flex; gap: 0.9rem; align-items: center; margin-top: 0.75rem; }
 .question-actions .primary { margin-top: 0; }
 

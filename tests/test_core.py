@@ -300,6 +300,43 @@ class StorageTests(unittest.TestCase):
             self.assertFalse((folder / "turn-01-speech.wav").exists())
 
 
+class RetellTests(unittest.TestCase):
+    def test_retell_is_kept_and_listed_under_the_question(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp))
+            session = store.create({"id": "city-food", "en": "What food?", "zh": "吃什么？"})
+            session, index = store.append_audio(session["id"], b"RIFFanswer", "audio/wav", 1000)
+            store.update_turn(
+                session["id"],
+                index,
+                status="ready",
+                feedback={"natural": "I like noodles.", "natural_zh": "我喜欢面条。"},
+            )
+            saved = store.save_retell(session["id"], index, b"webm-retell", "audio/webm")
+            self.assertEqual(saved["turns"][0]["retell_file"], "turn-01-retell.webm")
+            path, mime = store.retell_path(session["id"], index)
+            self.assertEqual(mime, "audio/webm")
+            self.assertEqual(path.read_bytes(), b"webm-retell")
+            session, second = store.append_audio(session["id"], b"RIFFnext", "audio/wav", 900)
+            store.update_turn(
+                session["id"],
+                second,
+                status="ready",
+                feedback={"natural": "A little spicy.", "natural_zh": "有一点辣。"},
+            )
+            lines = store.echoes_for_question("city-food")
+            self.assertEqual([item["index"] for item in lines], [1, 2])
+            self.assertEqual(lines[0]["natural"], "I like noodles.")
+            self.assertTrue(lines[0]["has_retell"])
+            replaced = store.update_turn(
+                session["id"],
+                index,
+                feedback={"natural": "I like rice.", "natural_zh": "我喜欢米饭。"},
+            )
+            self.assertNotIn("retell_file", replaced["turns"][0])
+            self.assertFalse(path.exists())
+
+
 class QuestionTests(unittest.TestCase):
     def test_questions_have_unique_ids(self):
         questions = load_questions()

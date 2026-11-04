@@ -351,6 +351,45 @@ def get_speech(session_id: str, index: int):
     return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
 
 
+@app.post("/api/sessions/{session_id}/turns/{index}/retell")
+async def save_retell(
+    session_id: str,
+    index: int,
+    audio: UploadFile = File(...),
+    mime_type: str | None = Form(None),
+):
+    data = await audio.read()
+    if len(data) < MIN_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="录音太短了，再说长一点。")
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="这段录音太长了，控制在 3 分钟内。")
+    mime = normalize_mime(mime_type or audio.content_type)
+    try:
+        return store.save_retell(session_id, index, data, mime)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/sessions/{session_id}/retell/{index}")
+def get_retell(session_id: str, index: int):
+    try:
+        path, mime = store.retell_path(session_id, index)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="还没有这段复述。") from exc
+    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/questions/{question_id}/echoes")
+def question_echoes(question_id: str):
+    try:
+        get_question(question_id)
+    except QuestionError as exc:
+        raise HTTPException(status_code=404, detail="找不到这道题。") from exc
+    return store.echoes_for_question(question_id)
+
+
 @app.get("/api/sessions/{session_id}/audio/{index}")
 def get_audio(session_id: str, index: int):
     try:
