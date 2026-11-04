@@ -12,7 +12,11 @@ _FEEDBACK_FALLBACKS = ("gemini-3.6-flash", "gemini-3.5-flash-lite")
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 
 
-class GeminiError(Exception):
+class ModelError(Exception):
+    pass
+
+
+class GeminiError(ModelError):
     pass
 
 

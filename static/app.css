@@ -53,7 +53,23 @@ h1 {
   letter-spacing: -0.03em;
 }
 
-.tabs { display: flex; gap: 0.35rem; }
+.tabs { display: flex; gap: 0.35rem; align-items: center; }
+
+.provider {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-right: 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.provider select {
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 999px;
+  padding: 0.28rem 0.55rem;
+}
 
 .tab, .text-btn, .retry, .history-item {
   border: 0;

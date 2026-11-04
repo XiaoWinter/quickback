@@ -286,6 +286,25 @@ class SessionStore:
             self._write(session)
             return session
 
+    def keep_existing_speech(self, session_id: str, index: int) -> dict | None:
+        name = f"turn-{index:02d}-speech.wav"
+        if not _SPEECH.match(name):
+            raise NotFound(session_id)
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            path = self._dir(session_id) / name
+            has_file = path.is_file() and path.stat().st_size > 0
+            has_flag = turn.get("speech_file") == name
+            if not has_file and not has_flag:
+                return None
+            if has_file and not has_flag:
+                turn["speech_file"] = name
+                turn["speech_mime"] = "audio/wav"
+                turn.pop("speech_error", None)
+                self._write(session)
+            return session
+
     def save_speech(self, session_id: str, index: int, data: bytes, natural: str | None = None) -> dict:
         name = f"turn-{index:02d}-speech.wav"
         if not _SPEECH.match(name):

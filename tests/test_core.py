@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,8 @@ from app.gemini_client import (
     wav_from_response,
 )
 from app.practice import PracticeStore
+from app.providers import ProviderStore
+from app.qwen_client import audio_url_from_qwen, chat_url, transcript_from_qwen, usable_audio_url
 from app.questions import (
     QuestionError,
     backfill_timestamps,
@@ -204,6 +207,15 @@ class StorageTests(unittest.TestCase):
             again = store.get(session["id"])
             self.assertEqual(again["turns"][0]["transcript"], "I like 火锅")
             spoken = store.save_speech(session["id"], 1, b"RIFFspeech")
+            kept = store.keep_existing_speech(session["id"], 1)
+            self.assertEqual(kept["turns"][0]["speech_file"], "turn-01-speech.wav")
+            raw_path = Path(tmp) / session["id"] / "session.json"
+            raw = json.loads(raw_path.read_text(encoding="utf-8"))
+            raw["turns"][0].pop("speech_file", None)
+            raw_path.write_text(json.dumps(raw), encoding="utf-8")
+            restored = store.keep_existing_speech(session["id"], 1)
+            self.assertEqual(restored["turns"][0]["speech_file"], "turn-01-speech.wav")
+            self.assertEqual((Path(tmp) / session["id"] / "turn-01-speech.wav").read_bytes(), b"RIFFspeech")
             path, mime = store.speech_path(session["id"], 1)
             self.assertEqual(mime, "audio/wav")
             self.assertEqual(path.read_bytes(), b"RIFFspeech")
@@ -340,6 +352,27 @@ class QuestionTests(unittest.TestCase):
             store.write(question_id="city-food")
             store.forget_question("city-food")
             self.assertEqual(store.read()["question_id"], "")
+
+
+class ProviderTests(unittest.TestCase):
+    def test_switch_is_remembered_and_qwen_text_is_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ProviderStore(Path(tmp) / "provider.json", default="gemini")
+            self.assertEqual(store.read(), "gemini")
+            store.write("qwen")
+            self.assertEqual(store.read(), "qwen")
+        self.assertEqual(
+            chat_url("https://dashscope.aliyuncs.com/api/v1"),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        )
+        text = transcript_from_qwen(
+            {"output": {"choices": [{"message": {"content": [{"text": "I like noodles"}]}}]}}
+        )
+        self.assertEqual(text, "I like noodles")
+        self.assertEqual(audio_url_from_qwen({"output": {"audio": {"url": "https://example.com/a.wav"}}}), "https://example.com/a.wav")
+        oss = "http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/a.wav"
+        self.assertEqual(usable_audio_url(oss), oss)
+        self.assertEqual(usable_audio_url("https://example.com/a.wav"), "")
 
 
 if __name__ == "__main__":

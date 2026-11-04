@@ -29,6 +29,7 @@ const turnsEl = document.getElementById("turns");
 const nextEl = document.getElementById("next-prompt");
 const recordBtn = document.getElementById("record");
 const newBtn = document.getElementById("new-question");
+const providerSelect = document.getElementById("provider");
 const reviewEl = document.getElementById("take-review");
 const takeAudio = document.getElementById("take-audio");
 const sendTakeBtn = document.getElementById("send-take");
@@ -176,6 +177,23 @@ function renderTranscript(parent, turn) {
 }
 
 const speechRequests = new Map();
+const keptSpeech = new Set();
+
+function forgetSpeech(sessionId, index) {
+  const key = `${sessionId}:${index}`;
+  speechRequests.delete(key);
+  keptSpeech.delete(key);
+}
+
+function forgetSessionSpeech(sessionId) {
+  const prefix = `${sessionId}:`;
+  for (const key of [...speechRequests.keys()]) {
+    if (String(key).startsWith(prefix)) speechRequests.delete(key);
+  }
+  for (const key of [...keptSpeech]) {
+    if (key.startsWith(prefix)) keptSpeech.delete(key);
+  }
+}
 
 function mediaSrc(kind, turn) {
   const version = encodeURIComponent(turn.created_at || "");
@@ -184,7 +202,9 @@ function mediaSrc(kind, turn) {
 
 function renderSpeech(parent, turn) {
   addLine(parent, "block-label", "发音");
-  if (turn.speech_file) {
+  const key = `${state.session.id}:${turn.index}`;
+  if (turn.speech_file) keptSpeech.add(key);
+  if (turn.speech_file || keptSpeech.has(key)) {
     const audio = document.createElement("audio");
     audio.controls = true;
     audio.preload = "metadata";
@@ -196,7 +216,6 @@ function renderSpeech(parent, turn) {
   const sessionId = state.session.id;
   const index = turn.index;
   const natural = ((turn.feedback || {}).natural || "").trim();
-  const key = `${sessionId}:${index}`;
   if (speechRequests.has(key)) return;
   const job = api(`/api/sessions/${sessionId}/turns/${index}/speech`, { method: "POST" })
     .then((session) => {
@@ -466,6 +485,7 @@ function syncControls() {
   sendTakeBtn.disabled = state.busy;
   redoTakeBtn.disabled = state.busy;
   newBtn.disabled = state.busy || state.recording || Boolean(state.pending);
+  if (providerSelect) providerSelect.disabled = state.busy || state.recording;
   recordBtn.classList.toggle("is-recording", state.recording);
   if (state.busy) {
     recordBtn.textContent = "正在转写，并生成反馈…";
@@ -604,7 +624,7 @@ async function uploadTake(blob, durationMs) {
   syncControls();
   try {
     state.session = await api(path, { method: "POST", body: form });
-    if (retake != null) speechRequests.delete(`${state.session.id}:${retake}`);
+    if (retake != null) forgetSpeech(state.session.id, retake);
     state.retake = null;
     clearPending();
     state.question = null;
@@ -823,7 +843,9 @@ async function saveTurn() {
 
 async function deleteTurn(index) {
   if (!await askConfirm("删掉这一段回答？录音也会一起删掉。")) return;
-  state.session = await api(`/api/sessions/${state.session.id}/turns/${index}`, { method: "DELETE" });
+  const sessionId = state.session.id;
+  state.session = await api(`/api/sessions/${sessionId}/turns/${index}`, { method: "DELETE" });
+  forgetSessionSpeech(sessionId);
   state.editingTurn = null;
   state.retake = null;
   showBanner("");
@@ -962,18 +984,44 @@ document.getElementById("history-list").addEventListener("click", async (event) 
   }
 });
 
+function missingKeyMessage(provider) {
+  if (provider === "qwen") {
+    return "还没填千问 Key。把 Key 写进 .env 的 DASHSCOPE_API_KEY，保存后重启。录音仍会留下。";
+  }
+  return "还没填 Gemini Key。把 Key 写进项目目录的 .env，保存后重启。录音仍会留下。";
+}
+
+function showProvider(view) {
+  state.provider = view.provider;
+  state.hasKey = view.has_key;
+  if (providerSelect) providerSelect.value = view.provider;
+  if (!view.has_key) showBanner(missingKeyMessage(view.provider));
+}
+
 async function init() {
   try {
-    const health = await api("/api/health");
-    state.hasKey = health.has_key;
-    if (!health.has_key) {
-      showBanner("还没填 Gemini Key。把 Key 写进项目目录的 .env，保存后重启。录音仍会留下。");
-    }
+    showProvider(await api("/api/provider"));
   } catch (error) {
     showBanner(error.message);
   }
   renderPractice();
   restorePractice();
 }
+
+providerSelect.addEventListener("change", async () => {
+  const next = providerSelect.value;
+  try {
+    const view = await api("/api/provider", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: next }),
+    });
+    showProvider(view);
+    if (view.has_key) showBanner("");
+  } catch (error) {
+    providerSelect.value = state.provider || "gemini";
+    showBanner(error.message);
+  }
+});
 
 init();

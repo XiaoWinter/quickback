@@ -10,7 +10,7 @@
 Copy-Item .env.example .env
 ```
 
-2. 用编辑器打开 `.env`，把 Google AI Studio 的免费 Key 填到 `GEMINI_API_KEY=` 后面。不要加引号，也不要把 Key 发给别人。
+2. 用编辑器打开 `.env`。Gemini 的 Key 填到 `GEMINI_API_KEY=`，千问的 Key 填到 `DASHSCOPE_API_KEY=`。不要加引号，也不要把 Key 发给别人。页面右上角可以切换当前模型。
 
 ## 启动
 

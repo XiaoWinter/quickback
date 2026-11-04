@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Quickback</title>
-  <link rel="stylesheet" href="/static/app.css?v=14">
+  <link rel="stylesheet" href="/static/app.css?v=18">
 </head>
 <body>
   <div class="page">
@@ -14,6 +14,12 @@
         <h1>说完就回</h1>
       </div>
       <nav class="tabs" aria-label="页面">
+        <label class="provider">模型
+          <select id="provider" aria-label="模型">
+            <option value="gemini">Gemini</option>
+            <option value="qwen">千问</option>
+          </select>
+        </label>
         <button type="button" id="tab-practice" class="tab is-active">练习</button>
         <button type="button" id="tab-history" class="tab">记录</button>
         <button type="button" id="tab-questions" class="tab">题目</button>
@@ -57,7 +63,7 @@
     </main>
 
     <footer class="foot">
-      录音存在这台电脑。识别和反馈会把这一小段发给 Gemini 免费接口。
+      录音存在这台电脑。识别和反馈会发给当前选中的模型。
     </footer>
   </div>
   <div id="confirm-dialog" class="confirm" hidden>
@@ -70,6 +76,6 @@
     </div>
   </div>
   <script src="/static/questions.js?v=8"></script>
-  <script src="/static/app.js?v=17"></script>
+  <script src="/static/app.js?v=19"></script>
 </body>
 </html>

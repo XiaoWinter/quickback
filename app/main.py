@@ -1,4 +1,5 @@
 import logging
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -6,8 +7,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import ROOT, settings
-from app.gemini_client import GeminiClient, GeminiError
+from app.gemini_client import GeminiClient, ModelError
 from app.practice import PracticeStore
+from app.providers import CHOICES, providers
+from app.qwen_client import QwenClient
 from app.questions import (
     QuestionError,
     backfill_timestamps,
@@ -25,6 +28,20 @@ log = logging.getLogger("quickback")
 
 MAX_AUDIO_BYTES = 12 * 1024 * 1024
 MIN_AUDIO_BYTES = 400
+_speech_locks: dict[tuple[str, int], object] = {}
+_speech_lock_guard = threading.Lock()
+
+
+def _turn_speech_lock(session_id: str, index: int):
+    import asyncio
+
+    key = (session_id, index)
+    with _speech_lock_guard:
+        lock = _speech_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _speech_locks[key] = lock
+        return lock
 
 app = FastAPI(title="Quickback")
 store = SessionStore(settings.data_dir)
@@ -40,7 +57,39 @@ def prepare_questions() -> None:
         log.warning("%s", exc)
 
 
-def _client() -> GeminiClient:
+def _has_key(name: str) -> bool:
+    if name == "qwen":
+        return bool(settings.qwen_api_key)
+    return bool(settings.gemini_api_key)
+
+
+def _provider_view() -> dict:
+    current = providers.read()
+    return {
+        "provider": current,
+        "has_key": _has_key(current),
+        "providers": [
+            {"id": "gemini", "label": "Gemini", "has_key": bool(settings.gemini_api_key)},
+            {"id": "qwen", "label": "千问", "has_key": bool(settings.qwen_api_key)},
+        ],
+    }
+
+
+def _client() -> GeminiClient | QwenClient:
+    name = providers.read()
+    if name == "qwen":
+        if not settings.qwen_api_key:
+            raise ModelError("还没有填写千问 Key。写进 .env 的 DASHSCOPE_API_KEY，保存后重启。")
+        return QwenClient(
+            api_key=settings.qwen_api_key,
+            feedback_model=settings.qwen_feedback_model,
+            asr_model=settings.qwen_asr_model,
+            tts_model=settings.qwen_tts_model,
+            tts_voice=settings.qwen_tts_voice,
+            base_url=settings.qwen_base_url,
+        )
+    if not settings.gemini_api_key:
+        raise ModelError("还没有填写 Gemini Key。写进 .env 后重启，再点重试。")
     return GeminiClient(
         api_key=settings.gemini_api_key,
         transcribe_model=settings.transcribe_model,
@@ -64,12 +113,27 @@ def index():
 
 @app.get("/api/health")
 def health():
+    current = _provider_view()
     return {
         "ok": True,
-        "has_key": bool(settings.gemini_api_key),
-        "transcribe_model": settings.transcribe_model,
-        "feedback_model": settings.feedback_model,
+        "provider": current["provider"],
+        "has_key": current["has_key"],
+        "providers": current["providers"],
     }
+
+
+@app.get("/api/provider")
+def provider_get():
+    return _provider_view()
+
+
+@app.put("/api/provider")
+def provider_put(payload: dict):
+    name = str(payload.get("provider") or "").strip().lower()
+    if name not in CHOICES:
+        raise HTTPException(status_code=400, detail="只能选 Gemini 或千问。")
+    providers.write(name)
+    return _provider_view()
 
 
 @app.get("/api/questions")
@@ -248,27 +312,34 @@ def session_clear_follow_up(session_id: str):
 async def create_speech(session_id: str, index: int):
     import asyncio
 
-    try:
-        session = store.get(session_id)
-        turn = next(item for item in session["turns"] if item["index"] == index)
-    except (NotFound, StopIteration) as exc:
-        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
-    if turn.get("speech_file"):
-        return session
-    natural = str((turn.get("feedback") or {}).get("natural") or "").strip()
-    if not natural:
-        raise HTTPException(status_code=400, detail="还没有地道版，不能生成发音。")
-    if not settings.gemini_api_key:
-        raise HTTPException(status_code=400, detail="还没有填写 Gemini Key。写进 .env 后重启。")
-    try:
-        audio = await asyncio.to_thread(_client().speak, natural)
-    except GeminiError as exc:
-        log.info("speech %s/%s failed: %s", session_id, index, exc)
-        detail = str(exc).replace("录音已留下，可以点重试。", "稍后再打开这条记录。")
-        detail = detail.replace("录音已留下，过一会儿点重试。", "稍后再打开这条记录。")
-        raise HTTPException(status_code=502, detail=detail) from exc
-    log.info("speech %s/%s saved %s bytes", session_id, index, len(audio))
-    return store.save_speech(session_id, index, audio, natural)
+    async with _turn_speech_lock(session_id, index):
+        try:
+            saved = store.keep_existing_speech(session_id, index)
+        except NotFound as exc:
+            raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+        if saved is not None:
+            return saved
+        try:
+            session = store.get(session_id)
+            turn = next(item for item in session["turns"] if item["index"] == index)
+        except (NotFound, StopIteration) as exc:
+            raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+        natural = str((turn.get("feedback") or {}).get("natural") or "").strip()
+        if not natural:
+            raise HTTPException(status_code=400, detail="还没有地道版，不能生成发音。")
+        try:
+            client = _client()
+        except ModelError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            audio = await asyncio.to_thread(client.speak, natural)
+        except ModelError as exc:
+            log.info("speech %s/%s failed: %s", session_id, index, exc)
+            detail = str(exc).replace("录音已留下，可以点重试。", "稍后再打开这条记录。")
+            detail = detail.replace("录音已留下，过一会儿点重试。", "稍后再打开这条记录。")
+            raise HTTPException(status_code=502, detail=detail) from exc
+        log.info("speech %s/%s saved %s bytes", session_id, index, len(audio))
+        return store.save_speech(session_id, index, audio, natural)
 
 
 @app.get("/api/sessions/{session_id}/speech/{index}")
@@ -365,19 +436,15 @@ async def _process(session_id: str, index: int) -> dict:
     except (NotFound, StopIteration) as exc:
         raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
 
-    if not settings.gemini_api_key:
-        return store.update_turn(
-            session_id,
-            index,
-            status="error",
-            error="还没有填写 Gemini Key。写进 .env 后重启，再点重试。",
-        )
+    try:
+        client = _client()
+    except ModelError as exc:
+        return store.update_turn(session_id, index, status="error", error=str(exc))
 
     audio_path = Path(store.audio_path(session_id, index)[0])
     mime = turn["mime_type"]
     transcript = ""
     try:
-        client = _client()
         transcript = await asyncio.to_thread(client.transcribe, audio_path.read_bytes(), mime)
         previous_natural = ""
         previous_natural_zh = ""
@@ -399,7 +466,7 @@ async def _process(session_id: str, index: int) -> dict:
             previous_natural=previous_natural,
             previous_natural_zh=previous_natural_zh,
         )
-    except GeminiError as exc:
+    except ModelError as exc:
         log.info("turn %s/%s failed: %s", session_id, index, exc)
         fields = {"status": "error", "error": str(exc)}
         if transcript:
