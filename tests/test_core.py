@@ -12,7 +12,8 @@ from app.gemini_client import (
 )
 from app.practice import PracticeStore
 from app.providers import ProviderStore
-from app.qwen_client import audio_url_from_qwen, chat_url, transcript_from_qwen, usable_audio_url
+from app.prompts import build_feedback_prompt
+from app.qwen_client import audio_url_from_qwen, chat_url, contains_cjk, transcript_from_qwen, usable_audio_url
 from app.questions import (
     QuestionError,
     backfill_timestamps,
@@ -373,6 +374,16 @@ class ProviderTests(unittest.TestCase):
         oss = "http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/a.wav"
         self.assertEqual(usable_audio_url(oss), oss)
         self.assertEqual(usable_audio_url("https://example.com/a.wav"), "")
+        self.assertTrue(contains_cjk("好像是这样"))
+        self.assertFalse(contains_cjk("Something like that."))
+        prompt = build_feedback_prompt(
+            topic_en="School",
+            topic_zh="上学",
+            prompt_en="Did you like it?",
+            prompt_zh="你喜欢吗？",
+            transcript="好像是这样。",
+        )
+        self.assertIn("Do not leave any Chinese characters in natural", prompt)
 
 
 if __name__ == "__main__":

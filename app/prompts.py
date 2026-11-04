@@ -39,9 +39,10 @@ Return one JSON object and nothing else. Use this shape:
 }}
 
 Rules for natural:
+- natural is English only. Translate every Chinese stretch into simple English with the same meaning. Do not leave any Chinese characters in natural.
 - Keep their meaning, facts, and order.
 - Copy English that is already fine, word for word.
-- Change only Chinese stretches, broken grammar, and clearly unidiomatic phrases.
+- Also fix broken grammar and clearly unidiomatic phrases.
 - Do not add facts, names, places, or polish they did not say.
 - Do not drop a point they made.
 - Do not make the line fancier or longer.
@@ -55,11 +56,11 @@ Rules for spoken_zh and natural_zh:
 - Keep names and numbers as they are.
 
 Example of the right amount of editing:
-Transcript: "I like noodles, 但是有点贵."
-spoken_zh: "我喜欢面条，但是有点贵。"
-natural: "I like noodles, but they're a bit expensive."
-natural_zh: "我喜欢面条，但是有点贵。"
-changes: [{{"spoken": "但是有点贵", "better": "but they're a bit expensive", "note": "后半句卡住了，按原意说成英文。"}}]
+Transcript: "I like noodles, 但是有点贵. 好像是这样。"
+spoken_zh: "我喜欢面条，但是有点贵。好像是这样。"
+natural: "I like noodles, but they're a bit expensive. Something like that."
+natural_zh: "我喜欢面条，但是有点贵。好像是这样。"
+changes: [{{"spoken": "但是有点贵", "better": "but they're a bit expensive", "note": "后半句卡住了，按原意说成英文。"}}, {{"spoken": "好像是这样", "better": "Something like that.", "note": "这句中文按原意说成英文。"}}]
 A wrong edit would be: "I'm particularly fond of the local hand-pulled noodles, though I find them somewhat pricey."
 
 Rules for changes:

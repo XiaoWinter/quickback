@@ -39,6 +39,10 @@ def audio_url_from_qwen(payload: dict) -> str:
     return str(audio.get("url") or "").strip()
 
 
+def contains_cjk(text: str) -> bool:
+    return any("\u3400" <= char <= "\u9fff" for char in text or "")
+
+
 def usable_audio_url(url: str) -> str:
     parsed = urlparse((url or "").strip())
     host = (parsed.hostname or "").lower()
@@ -138,7 +142,48 @@ class QwenClient:
             parsed = parse_feedback(text)
         except ModelError:
             raise
+        if contains_cjk(parsed.get("natural") or ""):
+            repaired = self._translate_leftover_chinese(parsed, transcript)
+            if repaired and not contains_cjk(repaired.get("natural") or ""):
+                parsed = repaired
         return apply_review_policy(parsed, transcript, previous_natural, previous_natural_zh)
+
+    def _translate_leftover_chinese(self, parsed: dict, transcript: str) -> dict | None:
+        payload = self._post(
+            chat_url(self.base_url),
+            {
+                "model": self.feedback_model,
+                "temperature": 0.2,
+                "enable_thinking": False,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "The natural line still contains Chinese. "
+                            "Translate each Chinese stretch into simple English with the same meaning. "
+                            "Keep the English that is already there. "
+                            "natural must not contain Chinese characters. "
+                            "Add one changes item for each Chinese stretch you replace. "
+                            "Return the full JSON object and nothing else.\n\n"
+                            f"Verbatim answer:\n\"\"\"{transcript}\"\"\"\n\n"
+                            "Current JSON:\n"
+                            + json.dumps(parsed, ensure_ascii=False)
+                        ),
+                    }
+                ],
+            },
+        )
+        choices = payload.get("choices") or []
+        text = ""
+        if choices:
+            text = str(((choices[0] or {}).get("message") or {}).get("content") or "").strip()
+        if not text:
+            return None
+        try:
+            return parse_feedback(text)
+        except ModelError:
+            return None
 
     def speak(self, text: str) -> bytes:
         spoken = " ".join((text or "").split())

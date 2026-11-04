@@ -1,5 +1,19 @@
 [
   {
+    "id": "what-would-you-like-to-do-any-further-st",
+    "en": "what would you like to do any further study?",
+    "zh": "你未来想学什么?",
+    "created_at": "2026-11-04T01:34:47-08:00",
+    "updated_at": "2026-11-04T01:34:47-08:00"
+  },
+  {
+    "id": "did-you-enjoy-studying-when-you-frist-st",
+    "en": "Did you enjoy studying when you frist started school?",
+    "zh": "你刚开始上学时，喜欢学习吗？",
+    "created_at": "2026-11-04T00:53:03-08:00",
+    "updated_at": "2026-11-04T00:53:03-08:00"
+  },
+  {
     "id": "do-you-like-to-read-the-newspaper",
     "en": "Do you like to read the newspaper?",
     "zh": "你喜欢读报纸吗？",

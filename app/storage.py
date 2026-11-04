@@ -286,6 +286,17 @@ class SessionStore:
             self._write(session)
             return session
 
+    def drop_speech(self, session_id: str, index: int) -> dict:
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            self._delete_named_files(self._dir(session_id), turn.get("speech_file"))
+            turn.pop("speech_file", None)
+            turn.pop("speech_mime", None)
+            turn.pop("speech_error", None)
+            self._write(session)
+            return session
+
     def keep_existing_speech(self, session_id: str, index: int) -> dict | None:
         name = f"turn-{index:02d}-speech.wav"
         if not _SPEECH.match(name):
