@@ -13,4 +13,7 @@ if (-not (Test-Path .env)) {
     Write-Host "已生成 .env。把 GEMINI_API_KEY 填进去后，重启一次就能识别和反馈。"
 }
 
-& .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8765
+$bind = & .\.venv\Scripts\python.exe -c "from app.config import settings; print(settings.host); print(settings.port)"
+$bindHost = ($bind | Select-Object -First 1).Trim()
+$bindPort = ($bind | Select-Object -Last 1).Trim()
+& .\.venv\Scripts\python.exe -m uvicorn app.main:app --host $bindHost --port $bindPort

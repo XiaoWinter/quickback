@@ -22,7 +22,7 @@ class Settings:
     speech_model = os.getenv("GEMINI_SPEECH_MODEL", "gemini-3.8-flash-tts").strip()
     speech_voice = os.getenv("GEMINI_SPEECH_VOICE", "Kore").strip() or "Kore"
     data_dir = _data_dir()
-    host = os.getenv("QUICKBACK_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    host = os.getenv("QUICKBACK_HOST", "0.0.0.0").strip() or "0.0.0.0"
     port = int(os.getenv("QUICKBACK_PORT", "8765"))
 
 
