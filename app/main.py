@@ -277,7 +277,7 @@ def get_speech(session_id: str, index: int):
         path, mime = store.speech_path(session_id, index)
     except NotFound as exc:
         raise HTTPException(status_code=404, detail="还没有这段发音。") from exc
-    return FileResponse(path, media_type=mime)
+    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/sessions/{session_id}/audio/{index}")
@@ -286,7 +286,7 @@ def get_audio(session_id: str, index: int):
         path, mime = store.audio_path(session_id, index)
     except NotFound as exc:
         raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
-    return FileResponse(path, media_type=mime)
+    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
 
 
 @app.post("/api/turns")

@@ -3,6 +3,7 @@
   const list = document.getElementById("question-list");
   let api = null;
   let report = null;
+  let answer = null;
   let editingId = null;
   let currentId = "";
 
@@ -74,6 +75,11 @@
         zh.textContent = question.zh;
         const actions = document.createElement("div");
         actions.className = "question-actions";
+        const use = document.createElement("button");
+        use.type = "button";
+        use.className = "text-btn";
+        use.dataset.answer = question.id;
+        use.textContent = "回答";
         const edit = document.createElement("button");
         edit.type = "button";
         edit.className = "text-btn";
@@ -84,7 +90,7 @@
         remove.className = "text-btn";
         remove.dataset.delete = question.id;
         remove.textContent = "删除";
-        actions.append(edit, remove);
+        actions.append(use, edit, remove);
         card.append(en, zh, actions);
       }
       list.appendChild(card);
@@ -121,11 +127,16 @@
   });
 
   list.addEventListener("click", async (event) => {
+    const use = event.target.closest("[data-answer]");
     const edit = event.target.closest("[data-edit]");
     const remove = event.target.closest("[data-delete]");
     const save = event.target.closest("[data-save]");
     const cancel = event.target.closest("[data-cancel]");
     try {
+      if (use) {
+        if (answer) await answer(use.dataset.answer);
+        return;
+      }
       if (edit) {
         editingId = edit.dataset.edit;
         await reload();
@@ -165,9 +176,10 @@
   });
 
   window.QuickbackQuestions = {
-    async show(request, notify) {
+    async show(request, notify, onAnswer) {
       api = request;
       report = notify;
+      answer = onAnswer;
       await reload();
     },
   };

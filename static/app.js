@@ -177,13 +177,18 @@ function renderTranscript(parent, turn) {
 
 const speechRequests = new Map();
 
+function mediaSrc(kind, turn) {
+  const version = encodeURIComponent(turn.created_at || "");
+  return `/api/sessions/${state.session.id}/${kind}/${turn.index}?v=${version}`;
+}
+
 function renderSpeech(parent, turn) {
   addLine(parent, "block-label", "发音");
   if (turn.speech_file) {
     const audio = document.createElement("audio");
     audio.controls = true;
     audio.preload = "metadata";
-    audio.src = `/api/sessions/${state.session.id}/speech/${turn.index}`;
+    audio.src = mediaSrc("speech", turn);
     parent.appendChild(audio);
     return;
   }
@@ -275,7 +280,7 @@ function renderTurn(turn) {
   addLine(said, "meta", `${formatWhen(turn.created_at)}${seconds}`);
   const audio = document.createElement("audio");
   audio.controls = true;
-  audio.src = `/api/sessions/${state.session.id}/audio/${turn.index}`;
+  audio.src = mediaSrc("audio", turn);
   said.appendChild(audio);
   card.appendChild(said);
 
@@ -901,10 +906,29 @@ newBtn.addEventListener("click", () => {
   pickQuestion(exclude);
 });
 
+async function answerQuestion(id) {
+  if (state.recording || state.busy) return;
+  state.editingPrompt = null;
+  state.editingTurn = null;
+  state.retake = null;
+  discardTake();
+  questionToken += 1;
+  const practice = await api("/api/practice", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question_id: id }),
+  });
+  state.session = practice.session;
+  state.question = practice.question;
+  showBanner("");
+  showPractice();
+  renderPractice();
+}
+
 async function showQuestions() {
   activate("questions");
   try {
-    await window.QuickbackQuestions.show(api, showBanner);
+    await window.QuickbackQuestions.show(api, showBanner, answerQuestion);
   } catch (error) {
     showBanner(error.message);
   }

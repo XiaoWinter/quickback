@@ -304,6 +304,7 @@ class QuestionTests(unittest.TestCase):
                 delete_question("only-one", path)
             created = create_question("What season do you like?", "你喜欢哪个季节？", path)
             self.assertEqual(created["id"], "what-season-do-you-like")
+            self.assertEqual(load_questions(path)[0]["id"], created["id"])
             self.assertTrue(created["created_at"])
             self.assertEqual(created["created_at"], created["updated_at"])
             updated = update_question(created["id"], created["en"], "你最喜欢什么季节？", path)

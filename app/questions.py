@@ -112,6 +112,7 @@ def load_questions(path: Path | None = None) -> list[dict]:
         created = _time(item.get("created_at"))
         updated = _time(item.get("updated_at")) or created
         questions.append({"id": qid, "en": en, "zh": zh, "created_at": created, "updated_at": updated})
+    questions.sort(key=lambda item: item.get("created_at") or "", reverse=True)
     return questions
 
 
@@ -152,7 +153,7 @@ def create_question(en: str, zh: str, path: Path | None = None) -> dict:
             "created_at": now,
             "updated_at": now,
         }
-        questions.append(item)
+        questions.insert(0, item)
         _persist(questions, file)
         return item
 
