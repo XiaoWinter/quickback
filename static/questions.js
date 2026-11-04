@@ -4,6 +4,7 @@
   let api = null;
   let report = null;
   let answer = null;
+  let removed = null;
   let editingId = null;
   let currentId = "";
   const openEchoes = new Set();
@@ -264,9 +265,10 @@
       }
       if (remove) {
         const ask = window.quickbackConfirm || ((text) => Promise.resolve(window.confirm(text)));
-        if (!await ask("删掉这道题？已经练过的记录还会留着。")) return;
+        if (!await ask("删掉这道题？它的追问和录音也会一起删掉。")) return;
         await api(`/api/questions/${remove.dataset.delete}`, { method: "DELETE" });
         if (editingId === remove.dataset.delete) editingId = null;
+        if (removed) await removed(remove.dataset.delete);
         report("");
         await reload();
       }
@@ -276,10 +278,11 @@
   });
 
   window.QuickbackQuestions = {
-    async show(request, notify, onAnswer) {
+    async show(request, notify, onAnswer, onRemoved) {
       api = request;
       report = notify;
       answer = onAnswer;
+      removed = onRemoved;
       await reload();
     },
   };

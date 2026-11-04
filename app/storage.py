@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 import threading
 import uuid
 from datetime import datetime
@@ -375,6 +376,55 @@ class SessionStore:
                     )
         lines.sort(key=lambda item: (item.get("session_at") or "", item.get("index") or 0))
         return lines
+
+    def delete_for_question(self, question_id: str) -> list[str]:
+        question_id = str(question_id or "")
+        if not question_id:
+            return []
+        removed = []
+        with self._lock:
+            if not self.root.exists():
+                return []
+            for folder in list(self.root.iterdir()):
+                if not folder.is_dir() or not _ID.match(folder.name):
+                    continue
+                path = folder / "session.json"
+                if not path.is_file():
+                    continue
+                try:
+                    session = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                question = session.get("question") or {}
+                if question.get("id") != question_id:
+                    continue
+                shutil.rmtree(folder)
+                removed.append(folder.name)
+        return removed
+
+    def latest_for_question(self, question_id: str) -> dict | None:
+        best = None
+        best_at = ""
+        with self._lock:
+            if not self.root.exists():
+                return None
+            for folder in self.root.iterdir():
+                path = folder / "session.json"
+                if not path.is_file():
+                    continue
+                try:
+                    session = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                question = session.get("question") or {}
+                turns = session.get("turns") or []
+                if question.get("id") != question_id or not turns:
+                    continue
+                updated = str(session.get("updated_at") or session.get("created_at") or "")
+                if best is None or updated >= best_at:
+                    best = session
+                    best_at = updated
+        return best
 
     def drop_speech(self, session_id: str, index: int) -> dict:
         with self._lock:

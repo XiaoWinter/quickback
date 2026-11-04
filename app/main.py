@@ -166,6 +166,7 @@ def questions_remove(question_id: str):
         delete_question(question_id)
     except QuestionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    store.delete_for_question(question_id)
     practice.forget_question(question_id)
     return {"ok": True}
 
@@ -218,6 +219,10 @@ def practice_put(payload: dict):
             question = get_question(question_id)
         except QuestionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        existing = store.latest_for_question(question["id"])
+        if existing:
+            practice.write(question_id=question["id"], session_id=existing["id"])
+            return {"question": None, "session": existing}
         practice.write(question_id=question["id"], session_id="")
         return {"question": question, "session": None}
     raise HTTPException(status_code=400, detail="要指定题目或记录。")

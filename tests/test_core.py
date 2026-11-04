@@ -253,6 +253,36 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(kept.read_bytes(), b"RIFFsecond-audio")
             self.assertFalse((kept.parent / "turn-02.wav").exists())
 
+    def test_deleting_a_question_removes_follow_ups_and_recordings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp))
+            other = store.create({"id": "other", "en": "Other?", "zh": "另一题？"})
+            store.append_audio(other["id"], b"RIFFkeep", "audio/wav", 800)
+            session = store.create({"id": "animals", "en": "What animals do you like?", "zh": "你喜欢什么动物？"})
+            session, _ = store.append_audio(session["id"], b"RIFFanswer", "audio/wav", 1200)
+            store.update_turn(
+                session["id"],
+                1,
+                status="ready",
+                transcript="I like dogs.",
+                feedback={
+                    "natural": "I like dogs.",
+                    "natural_zh": "我喜欢狗。",
+                    "follow_up": "Do you have one?",
+                    "follow_up_zh": "你养了吗？",
+                },
+            )
+            store.save_speech(session["id"], 1, b"RIFFspeech")
+            store.save_retell(session["id"], 1, b"RIFFretell", "audio/webm")
+            folder = Path(tmp) / session["id"]
+            self.assertTrue((folder / "turn-01.wav").is_file())
+            self.assertTrue((folder / "turn-01-speech.wav").is_file())
+            self.assertTrue((folder / "turn-01-retell.webm").is_file())
+            removed = store.delete_for_question("animals")
+            self.assertEqual(removed, [session["id"]])
+            self.assertFalse(folder.exists())
+            self.assertTrue((Path(tmp) / other["id"] / "turn-01.wav").is_file())
+
     def test_retake_replaces_one_turn_and_drops_its_old_speech(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = SessionStore(Path(tmp))
@@ -385,11 +415,10 @@ class QuestionTests(unittest.TestCase):
             store.write(question_id="city-food")
             self.assertEqual(store.read()["question_id"], "city-food")
             store.write(question_id="city-food", session_id="abc")
-            store.forget_question("city-food")
+            store.forget_question("other")
             self.assertEqual(store.read()["session_id"], "abc")
-            store.write(question_id="city-food")
             store.forget_question("city-food")
-            self.assertEqual(store.read()["question_id"], "")
+            self.assertEqual(store.read(), {"question_id": "", "session_id": ""})
 
 
 class ProviderTests(unittest.TestCase):

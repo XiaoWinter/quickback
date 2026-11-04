@@ -969,6 +969,22 @@ async function savePrompt(kind, card) {
   renderPractice();
 }
 
+async function dropQuestion(id) {
+  const current = state.session ? state.session.question.id : state.question && state.question.id;
+  if (current !== id) return;
+  if (state.session) forgetSessionSpeech(state.session.id);
+  state.editingPrompt = null;
+  state.editingTurn = null;
+  state.retake = null;
+  state.retell = null;
+  state.retellNote = null;
+  discardTake();
+  state.session = null;
+  state.question = null;
+  showBanner("");
+  await pickQuestion(id);
+}
+
 async function deletePrompt(kind) {
   if (kind === "follow") {
     if (!await askConfirm("删掉这句追问？")) return;
@@ -978,20 +994,10 @@ async function deletePrompt(kind) {
     renderPractice();
     return;
   }
-  if (!await askConfirm("从题库删掉这道题？已经练过的记录还会留着。")) return;
+  if (!await askConfirm("删掉这道题？它的追问和录音也会一起删掉。")) return;
   const id = state.session ? state.session.question.id : state.question.id;
   await api(`/api/questions/${id}`, { method: "DELETE" });
-  const hasTurns = state.session && (state.session.turns || []).length;
-  state.editingPrompt = null;
-  if (hasTurns) {
-    showBanner("这道题已从题库删掉。这次练习还留着。");
-    renderPractice();
-    return;
-  }
-  state.session = null;
-  state.question = null;
-  showBanner("");
-  await pickQuestion(id);
+  await dropQuestion(id);
 }
 
 recordBtn.addEventListener("click", () => {
@@ -1046,7 +1052,7 @@ async function answerQuestion(id) {
 async function showQuestions() {
   activate("questions");
   try {
-    await window.QuickbackQuestions.show(api, showBanner, answerQuestion);
+    await window.QuickbackQuestions.show(api, showBanner, answerQuestion, dropQuestion);
   } catch (error) {
     showBanner(error.message);
   }

@@ -25,7 +25,7 @@ class PracticeStore:
     def forget_question(self, question_id: str) -> None:
         with self._lock:
             current = self._read()
-            if current["question_id"] == question_id and not current["session_id"]:
+            if current["question_id"] == question_id:
                 self._write({"question_id": "", "session_id": ""})
 
     def _read(self) -> dict:
