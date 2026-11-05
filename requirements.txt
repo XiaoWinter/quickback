@@ -3,3 +3,4 @@ uvicorn>=0.32
 python-multipart>=0.0.12
 python-dotenv>=1.0
 google-genai>=1.30
+zhconv>=1.4

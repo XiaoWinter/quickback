@@ -4,6 +4,8 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlparse
 
+import zhconv
+
 from app.gemini_client import ModelError, apply_review_policy, parse_feedback
 from app.prompts import build_feedback_prompt
 
@@ -14,6 +16,10 @@ def chat_url(base_url: str) -> str:
     base = (base_url or "").rstrip("/")
     root = base[: -len("/api/v1")] if base.endswith("/api/v1") else base
     return root + "/compatible-mode/v1/chat/completions"
+
+
+def to_simplified(text: str) -> str:
+    return zhconv.convert(text or "", "zh-cn")
 
 
 def transcript_from_qwen(payload: dict) -> str:
@@ -101,7 +107,7 @@ class QwenClient:
         text = transcript_from_qwen(payload)
         if not text:
             raise ModelError("没有听清。录音已留下，可以再说一次，或点重试。")
-        return text
+        return to_simplified(text)
 
     def feedback(
         self,

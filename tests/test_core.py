@@ -13,7 +13,7 @@ from app.gemini_client import (
 from app.practice import PracticeStore
 from app.providers import ProviderStore
 from app.prompts import build_feedback_prompt
-from app.qwen_client import audio_url_from_qwen, chat_url, contains_cjk, transcript_from_qwen, usable_audio_url
+from app.qwen_client import audio_url_from_qwen, chat_url, contains_cjk, to_simplified, transcript_from_qwen, usable_audio_url
 from app.questions import (
     QuestionError,
     backfill_timestamps,
@@ -440,6 +440,8 @@ class ProviderTests(unittest.TestCase):
         oss = "http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/a.wav"
         self.assertEqual(usable_audio_url(oss), oss)
         self.assertEqual(usable_audio_url("https://example.com/a.wav"), "")
+        self.assertEqual(to_simplified("我喜歡狗，牠很可愛。I like dogs."), "我喜欢狗，它很可爱。I like dogs.")
+        self.assertEqual(to_simplified("我喜欢狗。"), "我喜欢狗。")
         self.assertTrue(contains_cjk("好像是这样"))
         self.assertFalse(contains_cjk("Something like that."))
         prompt = build_feedback_prompt(
