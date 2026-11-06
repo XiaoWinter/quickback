@@ -111,6 +111,19 @@ def index():
     return FileResponse(ROOT / "static" / "index.html", headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/api/cert")
+def download_ca_cert():
+    path = ROOT / "certs" / "quickback-ca.cer"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="还没有证书。在电脑上运行 issue-cert.ps1。")
+    return FileResponse(
+        path,
+        media_type="application/x-x509-ca-cert",
+        filename="quickback-ca.cer",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/api/health")
 def health():
     current = _provider_view()

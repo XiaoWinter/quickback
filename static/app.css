@@ -344,6 +344,8 @@ audio { width: 100%; margin-top: 0.35rem; }
 .confirm-actions .primary { margin-top: 0; background: var(--accent); color: var(--accent-ink); }
 
 .foot { margin-top: 1.5rem; }
+.foot p { margin: 0.35rem 0; }
+.cert-install a { color: var(--ink); margin-right: 0.45rem; }
 
 .error-line { color: #8e2618; }
 

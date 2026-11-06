@@ -16,4 +16,9 @@ if (-not (Test-Path .env)) {
 $bind = & .\.venv\Scripts\python.exe -c "from app.config import settings; print(settings.host); print(settings.port)"
 $bindHost = ($bind | Select-Object -First 1).Trim()
 $bindPort = ($bind | Select-Object -Last 1).Trim()
-& .\.venv\Scripts\python.exe -m uvicorn app.main:app --host $bindHost --port $bindPort
+$ssl = @()
+if ((Test-Path certs\server.key) -and (Test-Path certs\server.crt)) {
+    $ssl = @("--ssl-keyfile", "certs\server.key", "--ssl-certfile", "certs\server.crt")
+    Write-Host "已使用 certs 里的证书，请用 https 打开。"
+}
+& .\.venv\Scripts\python.exe -m uvicorn app.main:app --host $bindHost --port $bindPort @ssl
