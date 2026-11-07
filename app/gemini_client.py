@@ -10,6 +10,7 @@ log = logging.getLogger("quickback")
 _FEEDBACK_FALLBACKS = ("gemini-3.6-flash", "gemini-3.5-flash-lite")
 
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+_VARIANT_LEVELS = ("simple", "professional", "native")
 
 
 class ModelError(Exception):
@@ -30,7 +31,7 @@ def parse_feedback(text: str) -> dict:
         raise GeminiError("反馈没有按 JSON 返回，可以点重试。")
     natural = data.get("natural")
     if not isinstance(natural, str) or not natural.strip():
-        raise GeminiError("这次没有生成地道版，可以点重试。")
+        raise GeminiError("这次没有生成修正版，可以点重试。")
 
     changes = []
     for item in data.get("changes") or []:
@@ -59,14 +60,91 @@ def parse_feedback(text: str) -> dict:
         review = ""
     return {
         "natural": natural.strip(),
+        "intent": str(data.get("intent") or "").strip()[:200],
         "natural_zh": str(data.get("natural_zh") or "").strip()[:500],
         "spoken_zh": str(data.get("spoken_zh") or "").strip()[:500],
         "changes": changes[:12],
+        "chunks": _chunks_from(data.get("chunks"), natural.strip()),
+        "variants": _variants(data),
         "extensions": extensions[:3],
         "follow_up": str(data.get("follow_up") or "").strip(),
         "follow_up_zh": str(data.get("follow_up_zh") or "").strip(),
         "review": review.strip()[:500],
     }
+
+
+def _variants(data: dict) -> list[dict]:
+    raw = data.get("variants")
+    found: dict[str, dict] = {}
+    if isinstance(raw, dict):
+        for key in _VARIANT_LEVELS:
+            item = raw.get(key)
+            if isinstance(item, dict):
+                found[key] = item
+            elif isinstance(item, str):
+                found[key] = {"en": item}
+    elif isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip()
+            if key in _VARIANT_LEVELS:
+                found[key] = item
+    items = []
+    for key in _VARIANT_LEVELS:
+        item = found.get(key)
+        if not item:
+            continue
+        en = str(item.get("en") or item.get("line") or "").strip()[:800]
+        if not en:
+            continue
+        items.append({
+            "key": key,
+            "en": en,
+            "zh": str(item.get("zh") or "").strip()[:500],
+            "chunks": _chunks_from(item.get("chunks"), en),
+        })
+    return items
+
+
+_CHUNK_ROLES = {
+    "flow": "flow",
+    "flow_initiator": "flow",
+    "pivot": "pivot",
+    "logic_pivot": "pivot",
+    "refactor": "refactor",
+    "intent_refactor": "refactor",
+}
+
+
+def _chunk_role(item: dict) -> str:
+    raw = str(item.get("role") or item.get("intent") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return _CHUNK_ROLES.get(raw, "")
+
+
+def _chunks_from(raw, source: str) -> list[dict]:
+    source_norm = _normalize_answer(source)
+    if not source_norm or not isinstance(raw, list):
+        return []
+    items = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        role = _chunk_role(item)
+        en = str(item.get("en") or "").replace("…", "...").strip()
+        if not role or not en or re.search(r"[\u3400-\u9fff]", en):
+            continue
+        core = en.replace("...", " ")
+        core_norm = _normalize_answer(core)
+        words = core_norm.split()
+        if len(words) < 2 or len(words) > 5 or core_norm not in source_norm or core_norm == source_norm or core_norm in seen:
+            continue
+        seen.add(core_norm)
+        items.append({"en": en[:80], "role": role})
+        if len(items) >= 4:
+            break
+    return items
 
 
 def _normalize_answer(text: str) -> str:
@@ -101,6 +179,15 @@ def apply_review_policy(
         feedback["natural_zh"] = (previous_natural_zh or "").strip()
         feedback["changes"] = []
         feedback["review"] = ""
+    transcript_words = _normalize_answer(transcript)
+    kept = []
+    for change in feedback.get("changes") or []:
+        spoken = _normalize_answer(str(change.get("spoken") or ""))
+        if spoken and spoken in transcript_words:
+            kept.append(change)
+    feedback["changes"] = kept
+    if answers_match(str(feedback.get("natural") or ""), transcript):
+        feedback["changes"] = []
     return feedback
 
 
@@ -197,7 +284,7 @@ def wav_from_response(response) -> bytes:
                 data = base64.b64decode(data)
             if data.startswith(b"RIFF"):
                 return data
-    raise GeminiError("没有生成发音。地道版还在，可以稍后再试。")
+    raise GeminiError("没有生成发音。修正版还在，可以稍后再试。")
 
 
 def _response_text(response) -> str:
@@ -313,7 +400,7 @@ class GeminiClient:
     def speak(self, text: str) -> bytes:
         spoken = " ".join((text or "").split())
         if not spoken:
-            raise GeminiError("没有可以朗读的地道版。")
+            raise GeminiError("没有可以朗读的修正版。")
         if len(spoken) > 800:
             spoken = spoken[:800].rsplit(" ", 1)[0]
         _genai, types = _sdk()

@@ -4,12 +4,15 @@
   --card: #fffdf8;
   --ink: #1f1b16;
   --muted: #6f675e;
+  --label: #3a322b;
   --line: #e4dccf;
   --en: #1c5c43;
   --zh: #9a4510;
   --zh-bg: #f8eadb;
   --accent: #c4472d;
   --accent-ink: #fffaf6;
+  --heard: #2f8a52;
+  --heard-active: #1d6a3c;
   --shadow: 0 12px 32px rgba(70, 48, 20, 0.06);
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
@@ -27,15 +30,20 @@ button, input { font: inherit; color: inherit; }
 .page {
   width: min(42rem, calc(100% - 2rem));
   margin: 0 auto;
-  padding: 1.75rem 0 3rem;
+  padding: 0 0 3rem;
 }
 
 .top {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   justify-content: space-between;
   gap: 1rem;
   align-items: flex-end;
   margin-bottom: 1.25rem;
+  padding: 1.1rem 0 0.85rem;
+  background: var(--bg);
 }
 
 .brand {
@@ -110,9 +118,29 @@ h1 {
 
 .kicker {
   margin: 0;
-  color: var(--muted);
-  font-size: 0.78rem;
-  letter-spacing: 0.04em;
+  color: var(--label);
+  font-size: 0.86rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.section-head .kicker,
+.section-head .question-meta { margin: 0; }
+
+.section-head .question-actions {
+  margin: 0 0 0 auto;
+}
+
+.section-head .text-btn {
+  padding: 0;
+  font-size: 0.92rem;
 }
 
 .en-line {
@@ -155,6 +183,108 @@ h1 {
 
 .natural:last-of-type { margin-bottom: 0.85rem; }
 
+.turn-blocks { display: grid; gap: 0.85rem; }
+
+.framed {
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  padding: 0.55rem 0.75rem 0.7rem;
+}
+
+.framed .natural { margin: 0.15rem 0 0; }
+.framed .meaning { margin-bottom: 0.35rem; }
+.framed .note { margin: 0.15rem 0 0; }
+.framed-part { margin-top: 0.85rem; }
+
+.variant { margin-top: 0.75rem; }
+.variant .meaning { margin-bottom: 0; }
+
+.chunk-mark {
+  background: transparent;
+  color: inherit;
+  box-shadow: inset 0 -0.28rem 0 rgb(196 71 45 / 28%);
+}
+
+.chunk-speak {
+  flex: 0 1 auto;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 1.05rem;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chunk-speak:hover,
+.chunk-speak:focus-visible,
+.chunk-speak.is-playing { color: var(--accent); }
+
+.chunk-echo { margin-top: 0.85rem; }
+.chunk { margin-top: 0.65rem; }
+.chunk .natural { font-size: 1.05rem; }
+
+.chunk-line {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.chunk-role {
+  flex: none;
+  padding: 0.05rem 0.38rem;
+  border-radius: 0.32rem;
+  font-size: 0.72rem;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: 0.04em;
+}
+
+.chunk-role.is-flow { color: var(--en); background: #e5f1ea; }
+.chunk-role.is-pivot { color: var(--zh); background: var(--zh-bg); }
+.chunk-role.is-refactor { color: var(--accent); background: #f8e6e1; }
+
+.chunk-heard {
+  flex: none;
+  width: 2.1rem;
+  height: 0.85rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.2rem;
+  background: var(--heard);
+  cursor: pointer;
+}
+
+.chunk-heard.is-playing { background: var(--heard-active); }
+
+.echo-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.echo-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  margin-left: auto;
+}
+
+.echo-actions .text-btn {
+  padding: 0;
+  font-size: 0.92rem;
+}
+
+.framed .changes { margin-top: 0.35rem; }
+.framed .changes li:first-child { border-top: 0; padding-top: 0.15rem; }
+
 .meaning {
   margin: 0.2rem 0 0.85rem;
   color: var(--muted);
@@ -169,7 +299,87 @@ h1 {
 
 .meta { margin: 0; }
 
-audio { width: 100%; margin-top: 0.35rem; }
+.player {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  height: 2rem;
+  margin-top: 0.35rem;
+  padding: 0 0.55rem 0 0.22rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+}
+
+.player audio { display: none; }
+
+.player-play {
+  display: grid;
+  place-items: center;
+  width: 1.65rem;
+  height: 1.65rem;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+
+.player-play.is-playing { background: var(--accent); }
+
+.player.is-retell .player-play { background: var(--heard); }
+.player.is-retell .player-play.is-playing { background: var(--heard-active); }
+
+.player-play svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  display: block;
+}
+
+.player .player-range {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  height: 0.28rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  accent-color: var(--accent);
+  appearance: none;
+  background: var(--line);
+  border-radius: 999px;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.player-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 0.68rem;
+  height: 0.68rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.player-range::-moz-range-thumb {
+  width: 0.68rem;
+  height: 0.68rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.player-time {
+  flex: none;
+  min-width: 5.6rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
 
 .changes, .extensions { margin: 0.35rem 0 0; padding: 0; list-style: none; display: grid; gap: 0.65rem; }
 
@@ -183,9 +393,31 @@ audio { width: 100%; margin-top: 0.35rem; }
 
 .block-label {
   margin: 0;
-  font-size: 0.78rem;
-  letter-spacing: 0.04em;
+  color: var(--ink);
+  font-size: 1.12rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.block-label.rank-2 {
+  color: #5c534b;
+  font-size: 0.92rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.block-label.rank-3 {
   color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+}
+
+.block-label.rank-3::before {
+  content: "·";
+  margin-right: 0.4em;
+  color: #5c534b;
+  font-weight: 700;
 }
 
 .recorder {
@@ -205,8 +437,16 @@ audio { width: 100%; margin-top: 0.35rem; }
 .recorder.is-inline .hint { text-align: center; }
 .recorder.is-inline .take-review { width: 100%; }
 
-.record {
+.record-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.65rem;
   width: 100%;
+}
+
+.record {
+  width: auto;
+  flex: 1;
   height: 3.4rem;
   border: 0;
   border-radius: 999px;
@@ -216,7 +456,20 @@ audio { width: 100%; margin-top: 0.35rem; }
   cursor: pointer;
 }
 
-.record:disabled { opacity: 0.55; cursor: wait; }
+.record:disabled, .finish:disabled { opacity: 0.55; cursor: wait; }
+
+.finish {
+  flex: none;
+  min-width: 6.4rem;
+  height: 3.4rem;
+  padding: 0 1.6rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--heard);
+  color: var(--accent-ink);
+  font-size: 1.05rem;
+  cursor: pointer;
+}
 
 .take-review:not([hidden]) {
   width: min(100%, 24rem);
@@ -225,7 +478,7 @@ audio { width: 100%; margin-top: 0.35rem; }
   gap: 0.7rem;
 }
 
-.take-review audio { margin-top: 0; }
+.take-review .player { margin-top: 0; }
 
 .take-actions { display: flex; gap: 0.9rem; align-items: center; }
 .take-actions .primary { margin-top: 0; }
@@ -261,7 +514,9 @@ audio { width: 100%; margin-top: 0.35rem; }
   font-size: 0.85rem;
 }
 
-.question-form input, .question-item input, .prompt-edit input {
+.question-form input:not(.player-range),
+.question-item input:not(.player-range),
+.prompt-edit input:not(.player-range) {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -288,11 +543,19 @@ audio { width: 100%; margin-top: 0.35rem; }
 }
 
 .question-current { color: var(--en); font-weight: 650; }
+
+.question-status { color: var(--accent); font-weight: 650; }
+.question-status.is-done { color: var(--muted); }
 .retell { margin-top: 0.8rem; }
 .retell .text-btn { margin-top: 0.35rem; }
 
 .echoes { margin-top: 0.8rem; }
 .echoes summary { cursor: pointer; color: var(--muted); }
+.echo-list { display: grid; gap: 0.85rem; margin-top: 0.55rem; }
+.echo-turn { display: grid; gap: 0.4rem; }
+.echo-turn .en-line { font-size: 1.15rem; margin: 0; }
+.echo-turn .zh-line { margin: 0; }
+.chunk-phrase { font-size: 1.05rem; line-height: 1.4; }
 .echo { margin-top: 0.85rem; }
 .echo .block-label { margin-top: 0.45rem; }
 

@@ -10,6 +10,13 @@ _ID = re.compile(r"^[a-f0-9]{32}$")
 _AUDIO = re.compile(r"^turn-\d{2}\.[A-Za-z0-9]{1,5}$")
 _SPEECH = re.compile(r"^turn-\d{2}-speech\.wav$")
 _RETELL = re.compile(r"^turn-\d{2}-retell\.[A-Za-z0-9]{1,5}$")
+_LEVELS = ("simple", "professional", "native")
+_VARIANT_SPEECH = re.compile(r"^turn-\d{2}-speech-(?:simple|professional|native)\.wav$")
+_VARIANT_RETELL = re.compile(r"^turn-\d{2}-retell-(?:simple|professional|native)\.[A-Za-z0-9]{1,5}$")
+_CHUNK_RETELL = re.compile(r"^turn-\d{2}-retell-(?:main|simple|professional|native)-c\d{1,2}\.[A-Za-z0-9]{1,5}$")
+_CHUNK_SCOPES = ("main", "simple", "professional", "native")
+_ECHO_ROLES = frozenset({"flow", "pivot", "refactor"})
+_ECHO_CHUNK_ORDER = ("simple", "native", "professional")
 
 EXT_BY_MIME = {
     "audio/webm": ".webm",
@@ -47,6 +54,70 @@ def _prompt_text(en: str, zh: str) -> tuple[str, str]:
 def normalize_mime(mime: str | None) -> str:
     base = (mime or "").split(";", 1)[0].strip().lower()
     return base or "application/octet-stream"
+
+
+def _listed_chunks(owner: dict, scope: str, folder: Path) -> list[dict]:
+    raw = owner.get("chunks") if isinstance(owner, dict) else None
+    if not isinstance(raw, list):
+        return []
+    listed = []
+    for number, chunk in enumerate(raw):
+        if not isinstance(chunk, dict):
+            continue
+        role = str(chunk.get("role") or "")
+        en = str(chunk.get("en") or "").strip()
+        if role not in _ECHO_ROLES or not en:
+            continue
+        name = str(chunk.get("retell_file") or "")
+        listed.append(
+            {
+                "en": en,
+                "role": role,
+                "scope": scope,
+                "number": number,
+                "has_retell": bool(_CHUNK_RETELL.match(name) and (folder / name).is_file()),
+            }
+        )
+    return listed
+
+
+def _echo_chunks(feedback: dict, folder: Path) -> list[dict]:
+    found = _listed_chunks(feedback, "main", folder)
+    by_key = _variants_by_key(feedback)
+    for key in _ECHO_CHUNK_ORDER:
+        found.extend(_listed_chunks(by_key.get(key) or {}, key, folder))
+    return found
+
+
+def _variants_by_key(feedback: dict) -> dict:
+    found = {}
+    for item in feedback.get("variants") or []:
+        if isinstance(item, dict) and item.get("key"):
+            found[str(item["key"])] = item
+    return found
+
+
+def _echo_sources(feedback: dict, turn: dict, folder: Path) -> dict:
+    sources = {}
+    natural = str(feedback.get("natural") or "").strip()
+    speech = str(turn.get("speech_file") or "")
+    if natural:
+        sources["main"] = {
+            "en": natural,
+            "has_speech": bool(_SPEECH.match(speech) and (folder / speech).is_file()),
+        }
+    by_key = _variants_by_key(feedback)
+    for key in _ECHO_CHUNK_ORDER:
+        item = by_key.get(key) or {}
+        en = str(item.get("en") or "").strip()
+        name = str(item.get("speech_file") or "")
+        if not en:
+            continue
+        sources[key] = {
+            "en": en,
+            "has_speech": bool(_VARIANT_SPEECH.match(name) and (folder / name).is_file()),
+        }
+    return sources
 
 
 class SessionStore:
@@ -126,6 +197,7 @@ class SessionStore:
             filename = f"turn-{index:02d}{ext}"
             (self._dir(session_id) / filename).write_bytes(data)
             prompt = session.get("pending_prompt") or session["question"]
+            session.pop("closed", None)
             session["turns"].append(
                 {
                     "index": index,
@@ -165,7 +237,12 @@ class SessionStore:
             (folder / filename).write_bytes(data)
             if old_audio and old_audio != filename:
                 self._delete_named_files(folder, old_audio)
-            self._delete_named_files(folder, turn.get("speech_file"), turn.get("retell_file"))
+            self._delete_named_files(
+                folder,
+                turn.get("speech_file"),
+                turn.get("retell_file"),
+                *self._variant_media(turn.get("feedback")),
+            )
             turn["created_at"] = now_iso()
             turn["duration_ms"] = duration_ms
             turn["audio_file"] = filename
@@ -183,6 +260,7 @@ class SessionStore:
             if session["turns"][-1]["index"] == index:
                 prompt = turn.get("prompt") or session["question"]
                 session["pending_prompt"] = {"en": prompt.get("en", ""), "zh": prompt.get("zh", "")}
+            session.pop("closed", None)
             self._write(session)
             return session
 
@@ -194,6 +272,8 @@ class SessionStore:
             old_feedback = turn.get("feedback")
             if isinstance(old_feedback, dict):
                 old_natural = str(old_feedback.get("natural") or "").strip()
+            if "feedback" in fields and fields.get("feedback") is not old_feedback:
+                self._delete_named_files(self._dir(session_id), *self._variant_media(old_feedback))
             turn.update(fields)
             new_feedback = turn.get("feedback")
             new_natural = str(new_feedback.get("natural") or "").strip() if isinstance(new_feedback, dict) else ""
@@ -253,6 +333,50 @@ class SessionStore:
             self._write(session)
             return session
 
+    def finish_practice(self, session_id: str) -> dict:
+        with self._lock:
+            session = self._read(session_id)
+            if not session.get("turns"):
+                raise StorageError("还没有回答，不能归档。")
+            session["closed"] = True
+            self._write(session)
+            return session
+
+    def reopen_practice(self, session_id: str) -> dict:
+        with self._lock:
+            session = self._read(session_id)
+            session.pop("closed", None)
+            self._write(session)
+            return session
+
+    def latest_states(self) -> dict[str, dict]:
+        best: dict[str, dict] = {}
+        best_at: dict[str, str] = {}
+        with self._lock:
+            if not self.root.exists():
+                return {}
+            for folder in self.root.iterdir():
+                path = folder / "session.json"
+                if not path.is_file():
+                    continue
+                try:
+                    session = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                question = session.get("question") or {}
+                question_id = str(question.get("id") or "")
+                if not question_id or not (session.get("turns") or []):
+                    continue
+                updated = str(session.get("updated_at") or session.get("created_at") or "")
+                if question_id in best and updated < best_at[question_id]:
+                    continue
+                best[question_id] = {
+                    "session_id": str(session.get("id") or ""),
+                    "closed": bool(session.get("closed")),
+                }
+                best_at[question_id] = updated
+        return best
+
     def update_answered_turn(
         self,
         session_id: str,
@@ -267,7 +391,7 @@ class SessionStore:
             natural = str(natural or "").strip()
             natural_zh = str(natural_zh or "").strip()
             if not natural:
-                raise StorageError("地道版不能空。")
+                raise StorageError("修正版不能空。")
             if len(natural) > 800 or len(natural_zh) > 500:
                 raise StorageError("这句太长了。")
         with self._lock:
@@ -292,11 +416,19 @@ class SessionStore:
             turn = self._turn(session, index)
             folder = self._dir(session_id)
             was_last = session["turns"][-1]["index"] == index
-            self._delete_named_files(folder, turn.get("audio_file"), turn.get("speech_file"), turn.get("retell_file"))
+            self._delete_named_files(
+                folder,
+                turn.get("audio_file"),
+                turn.get("speech_file"),
+                turn.get("retell_file"),
+                *self._variant_media(turn.get("feedback")),
+            )
             session["turns"] = [item for item in session["turns"] if item.get("index") != index]
             self._renumber_turns(folder, session["turns"])
             if was_last:
                 self._set_pending_from_last(session)
+            if not session["turns"]:
+                session.pop("closed", None)
             self._write(session)
             return session
 
@@ -313,7 +445,7 @@ class SessionStore:
             turn = self._turn(session, index)
             natural = str(((turn.get("feedback") or {}).get("natural") or "")).strip()
             if turn.get("status") != "ready" or not natural:
-                raise StorageError("还没有地道版，不能复述。")
+                raise StorageError("还没有修正版，不能复述。")
             folder = self._dir(session_id)
             old = turn.get("retell_file") or ""
             (folder / name).write_bytes(data)
@@ -323,6 +455,183 @@ class SessionStore:
             turn["retell_mime"] = mime
             self._write(session)
             return session
+
+    def drop_retell(self, session_id: str, index: int) -> dict:
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            name = turn.get("retell_file") or ""
+            if not _RETELL.match(name):
+                raise NotFound(session_id)
+            self._delete_named_files(self._dir(session_id), name)
+            turn.pop("retell_file", None)
+            turn.pop("retell_mime", None)
+            self._write(session)
+            return session
+
+    def save_variant_retell(self, session_id: str, index: int, level: str, data: bytes, mime: str) -> dict:
+        level = self._level(level)
+        mime = normalize_mime(mime)
+        ext = EXT_BY_MIME.get(mime)
+        if not ext:
+            raise StorageError("这段录音的格式不支持。")
+        name = f"turn-{index:02d}-retell-{level}{ext}"
+        if not _VARIANT_RETELL.match(name):
+            raise StorageError("这段录音的格式不支持。")
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            item = self._variant_item(turn, level)
+            if item is None:
+                raise StorageError("还没有这句表达，不能跟读。")
+            folder = self._dir(session_id)
+            old = item.get("retell_file") or ""
+            (folder / name).write_bytes(data)
+            if old and old != name:
+                self._delete_named_files(folder, old)
+            item["retell_file"] = name
+            item["retell_mime"] = mime
+            self._write(session)
+            return session
+
+    def drop_variant_retell(self, session_id: str, index: int, level: str) -> dict:
+        level = self._level(level)
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            item = self._variant_item(turn, level)
+            name = (item or {}).get("retell_file") or ""
+            if item is None or not _VARIANT_RETELL.match(name):
+                raise NotFound(session_id)
+            self._delete_named_files(self._dir(session_id), name)
+            item.pop("retell_file", None)
+            item.pop("retell_mime", None)
+            self._write(session)
+            return session
+
+    def variant_retell_path(self, session_id: str, index: int, level: str) -> tuple[Path, str]:
+        level = self._level(level)
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            item = self._variant_item(turn, level) or {}
+            name = item.get("retell_file") or ""
+            if not _VARIANT_RETELL.match(name):
+                raise NotFound(session_id)
+            path = self._dir(session_id) / name
+            if not path.is_file():
+                raise NotFound(session_id)
+            return path, item.get("retell_mime") or "application/octet-stream"
+
+    def save_chunk_retell(self, session_id: str, index: int, scope: str, number: int, data: bytes, mime: str) -> dict:
+        scope = self._scope(scope)
+        mime = normalize_mime(mime)
+        ext = EXT_BY_MIME.get(mime)
+        if not ext:
+            raise StorageError("这段录音的格式不支持。")
+        name = f"turn-{index:02d}-retell-{scope}-c{number}{ext}"
+        if not _CHUNK_RETELL.match(name):
+            raise StorageError("这段录音的格式不支持。")
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            item = self._chunk_item(turn, scope, number)
+            if item is None:
+                raise StorageError("还没有这句，不能跟读。")
+            folder = self._dir(session_id)
+            old = item.get("retell_file") or ""
+            (folder / name).write_bytes(data)
+            if old and old != name:
+                self._delete_named_files(folder, old)
+            item["retell_file"] = name
+            item["retell_mime"] = mime
+            self._write(session)
+            return session
+
+    def drop_chunk_retell(self, session_id: str, index: int, scope: str, number: int) -> dict:
+        scope = self._scope(scope)
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            item = self._chunk_item(turn, scope, number)
+            name = (item or {}).get("retell_file") or ""
+            if item is None or not _CHUNK_RETELL.match(name):
+                raise NotFound(session_id)
+            self._delete_named_files(self._dir(session_id), name)
+            item.pop("retell_file", None)
+            item.pop("retell_mime", None)
+            self._write(session)
+            return session
+
+    def chunk_retell_path(self, session_id: str, index: int, scope: str, number: int) -> tuple[Path, str]:
+        scope = self._scope(scope)
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            item = self._chunk_item(turn, scope, number) or {}
+            name = item.get("retell_file") or ""
+            if not _CHUNK_RETELL.match(name):
+                raise NotFound(session_id)
+            path = self._dir(session_id) / name
+            if not path.is_file():
+                raise NotFound(session_id)
+            return path, item.get("retell_mime") or "application/octet-stream"
+
+    def keep_existing_variant_speech(self, session_id: str, index: int, level: str) -> dict | None:
+        level = self._level(level)
+        name = f"turn-{index:02d}-speech-{level}.wav"
+        if not _VARIANT_SPEECH.match(name):
+            raise NotFound(session_id)
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            item = self._variant_item(turn, level)
+            if item is None:
+                raise StorageError("还没有这句表达，不能生成发音。")
+            path = self._dir(session_id) / name
+            has_file = path.is_file() and path.stat().st_size > 0
+            has_flag = item.get("speech_file") == name
+            if not has_file and not has_flag:
+                return None
+            if has_file and not has_flag:
+                item["speech_file"] = name
+                item["speech_mime"] = "audio/wav"
+                self._write(session)
+            return session
+
+    def save_variant_speech(self, session_id: str, index: int, level: str, data: bytes, text: str | None = None) -> dict:
+        level = self._level(level)
+        name = f"turn-{index:02d}-speech-{level}.wav"
+        if not _VARIANT_SPEECH.match(name):
+            raise NotFound(session_id)
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            item = self._variant_item(turn, level)
+            if item is None:
+                raise StorageError("还没有这句表达，不能生成发音。")
+            current = str(item.get("en") or "").strip()
+            if text is not None and current != str(text).strip():
+                return session
+            (self._dir(session_id) / name).write_bytes(data)
+            item["speech_file"] = name
+            item["speech_mime"] = "audio/wav"
+            self._write(session)
+            return session
+
+    def variant_speech_path(self, session_id: str, index: int, level: str) -> tuple[Path, str]:
+        level = self._level(level)
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            item = self._variant_item(turn, level) or {}
+            name = item.get("speech_file") or ""
+            if name != f"turn-{index:02d}-speech-{level}.wav" or not _VARIANT_SPEECH.match(name):
+                raise NotFound(session_id)
+            path = self._dir(session_id) / name
+            if not path.is_file():
+                raise NotFound(session_id)
+            return path, item.get("speech_mime") or "audio/wav"
 
     def retell_path(self, session_id: str, index: int) -> tuple[Path, str]:
         with self._lock:
@@ -372,6 +681,8 @@ class SessionStore:
                             "natural_zh": str(feedback.get("natural_zh") or "").strip(),
                             "has_speech": bool(_SPEECH.match(speech) and (folder / speech).is_file()),
                             "has_retell": bool(_RETELL.match(retell) and (folder / retell).is_file()),
+                            "chunks": _echo_chunks(feedback, folder),
+                            "sources": _echo_sources(feedback, turn, folder),
                         }
                     )
         lines.sort(key=lambda item: (item.get("session_at") or "", item.get("index") or 0))
@@ -497,9 +808,85 @@ class SessionStore:
                 raise NotFound(session_id)
             return path, turn.get("mime_type") or "application/octet-stream"
 
+    def _scope(self, scope: str) -> str:
+        scope = str(scope or "").strip()
+        if scope not in _CHUNK_SCOPES:
+            raise StorageError("没有这一档表达。")
+        return scope
+
+    def _chunk_item(self, turn: dict, scope: str, number: int) -> dict | None:
+        if not isinstance(number, int) or isinstance(number, bool) or number < 0 or number > 7:
+            return None
+        feedback = turn.get("feedback")
+        if not isinstance(feedback, dict):
+            return None
+        owner = feedback if scope == "main" else self._variant_item(turn, scope)
+        if not isinstance(owner, dict):
+            return None
+        chunks = owner.get("chunks")
+        if not isinstance(chunks, list) or number >= len(chunks):
+            return None
+        item = chunks[number]
+        if not isinstance(item, dict) or not str(item.get("en") or "").strip():
+            return None
+        return item
+
+    def _level(self, level: str) -> str:
+        level = str(level or "").strip()
+        if level not in _LEVELS:
+            raise StorageError("没有这一档表达。")
+        return level
+
+    def _variant_item(self, turn: dict, level: str) -> dict | None:
+        feedback = turn.get("feedback")
+        if not isinstance(feedback, dict):
+            return None
+        for item in feedback.get("variants") or []:
+            if isinstance(item, dict) and item.get("key") == level and str(item.get("en") or "").strip():
+                return item
+        return None
+
+    def _plan_chunk_moves(self, owner, new_index: int, planned: list) -> None:
+        if not isinstance(owner, dict):
+            return
+        for chunk in owner.get("chunks") or []:
+            if not isinstance(chunk, dict):
+                continue
+            name = str(chunk.get("retell_file") or "")
+            if not _CHUNK_RETELL.match(name):
+                continue
+            renamed = re.sub(r"^turn-\d{2}", f"turn-{new_index:02d}", name, count=1)
+            planned.append((chunk, "retell_file", name, renamed))
+
+    def _chunk_files(self, owner, names: list[str]) -> None:
+        if not isinstance(owner, dict):
+            return
+        for chunk in owner.get("chunks") or []:
+            if not isinstance(chunk, dict):
+                continue
+            name = str(chunk.get("retell_file") or "")
+            if _CHUNK_RETELL.match(name):
+                names.append(name)
+
+    def _variant_media(self, feedback) -> list[str]:
+        names = []
+        if not isinstance(feedback, dict):
+            return names
+        self._chunk_files(feedback, names)
+        for item in feedback.get("variants") or []:
+            if not isinstance(item, dict):
+                continue
+            for field in ("speech_file", "retell_file"):
+                name = str(item.get(field) or "")
+                if _VARIANT_SPEECH.match(name) or _VARIANT_RETELL.match(name):
+                    names.append(name)
+            self._chunk_files(item, names)
+        return names
+
     def _delete_named_files(self, folder: Path, *names: str) -> None:
+        allowed = (_AUDIO, _SPEECH, _RETELL, _VARIANT_SPEECH, _VARIANT_RETELL, _CHUNK_RETELL)
         for name in names:
-            if not name or not (_AUDIO.match(name) or _SPEECH.match(name) or _RETELL.match(name)):
+            if not name or not any(pattern.match(name) for pattern in allowed):
                 continue
             path = folder / name
             if path.is_file():
@@ -513,15 +900,30 @@ class SessionStore:
             planned = []
             audio = turn.get("audio_file") or ""
             if audio and _AUDIO.match(audio):
-                planned.append(("audio_file", audio, f"turn-{new_index:02d}{Path(audio).suffix}"))
+                planned.append((turn, "audio_file", audio, f"turn-{new_index:02d}{Path(audio).suffix}"))
             speech = turn.get("speech_file") or ""
             if speech and _SPEECH.match(speech):
-                planned.append(("speech_file", speech, f"turn-{new_index:02d}-speech.wav"))
+                planned.append((turn, "speech_file", speech, f"turn-{new_index:02d}-speech.wav"))
             retell = turn.get("retell_file") or ""
             if retell and _RETELL.match(retell):
-                planned.append(("retell_file", retell, f"turn-{new_index:02d}-retell{Path(retell).suffix}"))
+                planned.append((turn, "retell_file", retell, f"turn-{new_index:02d}-retell{Path(retell).suffix}"))
+            feedback = turn.get("feedback") if isinstance(turn.get("feedback"), dict) else {}
+            for item in feedback.get("variants") or []:
+                if not isinstance(item, dict):
+                    continue
+                variant_speech = item.get("speech_file") or ""
+                if _VARIANT_SPEECH.match(variant_speech):
+                    level = Path(variant_speech).stem.split("-")[-1]
+                    planned.append((item, "speech_file", variant_speech, f"turn-{new_index:02d}-speech-{level}.wav"))
+                variant_retell = item.get("retell_file") or ""
+                if _VARIANT_RETELL.match(variant_retell):
+                    level = Path(variant_retell).stem.split("-")[-1]
+                    suffix = Path(variant_retell).suffix
+                    planned.append((item, "retell_file", variant_retell, f"turn-{new_index:02d}-retell-{level}{suffix}"))
+                self._plan_chunk_moves(item, new_index, planned)
+            self._plan_chunk_moves(feedback, new_index, planned)
             moved = []
-            for field, old_name, new_name in planned:
+            for owner, field, old_name, new_name in planned:
                 if old_name == new_name:
                     continue
                 src = folder / old_name
@@ -529,15 +931,15 @@ class SessionStore:
                     continue
                 tmp = folder / f".tmp-{old_index}-{old_name}"
                 src.rename(tmp)
-                moved.append((field, tmp, new_name))
+                moved.append((owner, field, tmp, new_name))
             staged.append((turn, new_index, moved))
         for turn, new_index, moved in staged:
-            for field, tmp, new_name in moved:
+            for owner, field, tmp, new_name in moved:
                 dest = folder / new_name
                 if dest.exists():
                     dest.unlink()
                 tmp.rename(dest)
-                turn[field] = new_name
+                owner[field] = new_name
             turn["index"] = new_index
 
     def _set_pending_from_last(self, session: dict) -> None:

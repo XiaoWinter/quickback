@@ -70,6 +70,7 @@ class FeedbackTests(unittest.TestCase):
         raw = """
         {
           "natural": "Yesterday I ate instant noodles.",
+          "intent": "昨天吃了方便面。",
           "natural_zh": "昨天我吃了方便面。",
           "spoken_zh": "昨天我吃了快速方便面。",
           "changes": [],
@@ -79,8 +80,55 @@ class FeedbackTests(unittest.TestCase):
         }
         """
         data = parse_feedback(raw)
+        self.assertEqual(data["intent"], "昨天吃了方便面。")
         self.assertEqual(data["natural_zh"], "昨天我吃了方便面。")
         self.assertEqual(data["spoken_zh"], "昨天我吃了快速方便面。")
+        self.assertEqual(data["variants"], [])
+
+    def test_parse_keeps_three_variants_in_order(self):
+        raw = """
+        {
+          "natural": "I like cats. I have two guinea pigs.",
+          "variants": {
+            "native": {"en": "I like cats, but my two pets are guinea pigs.", "zh": "我喜欢猫，但我的两只宠物是豚鼠。"},
+            "simple": "I like cats. I have two guinea pigs.",
+            "professional": {"en": "I like cats. I keep two guinea pigs as pets.", "zh": "我喜欢猫。我养了两只豚鼠。"},
+            "fancy": {"en": "nope", "zh": "不要"}
+          }
+        }
+        """
+        data = parse_feedback(raw)
+        self.assertEqual([item["key"] for item in data["variants"]], ["simple", "professional", "native"])
+        self.assertEqual(data["variants"][0]["zh"], "")
+        self.assertEqual(data["variants"][2]["en"], "I like cats, but my two pets are guinea pigs.")
+
+    def test_chunks_must_be_taken_from_that_line(self):
+        raw = """
+        {
+          "natural": "I like cats. Actually, I have two guinea pigs.",
+          "chunks": [
+            {"en": "I like", "role": "FLOW_INITIATOR"},
+            {"en": "Actually, I have", "role": "intent_refactor"},
+            {"en": "I like cats. Actually, I have two guinea pigs.", "role": "flow"},
+            {"en": "I own a farm", "role": "pivot"},
+            {"en": "I", "role": "flow"},
+            {"en": "two guinea pigs", "role": "hobby"}
+          ],
+          "variants": {
+            "simple": {"en": "I like cats. I have two guinea pigs.", "zh": "我喜欢猫。我有两只豚鼠。", "chunks": [{"en": "I have", "role": "LOGIC_PIVOT"}]},
+            "native": {"en": "I like cats.", "zh": "我喜欢猫。", "chunks": [{"en": "not here", "role": "flow"}]}
+          }
+        }
+        """
+        data = parse_feedback(raw)
+        self.assertEqual(data["chunks"], [
+            {"en": "I like", "role": "flow"},
+            {"en": "Actually, I have", "role": "refactor"},
+        ])
+        simple = next(item for item in data["variants"] if item["key"] == "simple")
+        native = next(item for item in data["variants"] if item["key"] == "native")
+        self.assertEqual(simple["chunks"], [{"en": "I have", "role": "pivot"}])
+        self.assertEqual(native["chunks"], [])
 
     def test_transcript_comes_from_audio_transcription(self):
         class Transcription:
@@ -162,6 +210,17 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(feedback["natural"], suggested)
         self.assertEqual(feedback["review"], "")
 
+    def test_change_must_quote_the_transcript(self):
+        feedback = apply_review_policy(
+            {
+                "natural": "Her voice sounds soft and gentle.",
+                "changes": [{"spoken": "软和温柔", "better": "soft and gentle", "note": "用更自然的英文表达原意。"}],
+                "review": "",
+            },
+            "Her voice sounds soft and gentle.",
+        )
+        self.assertEqual(feedback["changes"], [])
+
     def test_real_gap_keeps_the_review(self):
         feedback = apply_review_policy(
             {
@@ -230,6 +289,7 @@ class StorageTests(unittest.TestCase):
             cleared = store.clear_follow_up(session["id"])
             self.assertEqual(cleared["pending_prompt"]["en"], "What food?")
             self.assertEqual(cleared["turns"][0]["feedback"]["follow_up"], "")
+            self.assertNotIn("closed", cleared)
             with self.assertRaises(StorageError):
                 store.update_follow_up(session["id"], "", "没有英文")
             session, second = store.append_audio(session["id"], b"RIFFsecond-audio", "audio/wav", 900)
@@ -330,6 +390,31 @@ class StorageTests(unittest.TestCase):
             self.assertFalse((folder / "turn-01-speech.wav").exists())
 
 
+class FinishTests(unittest.TestCase):
+    def test_finish_closes_practice_until_the_next_recording(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp))
+            session = store.create({"id": "city-food", "en": "What food?", "zh": "吃什么？"})
+            session, index = store.append_audio(session["id"], b"RIFFanswer", "audio/wav", 1000)
+            store.update_turn(
+                session["id"],
+                index,
+                status="ready",
+                feedback={"natural": "I like noodles.", "follow_up": "At home?", "follow_up_zh": "在家做吗？"},
+            )
+            finished = store.finish_practice(session["id"])
+            self.assertTrue(finished["closed"])
+            self.assertEqual(finished["pending_prompt"]["en"], "At home?")
+            self.assertEqual(finished["turns"][0]["feedback"]["follow_up"], "At home?")
+            reopened = store.replace_audio(session["id"], index, b"RIFFagain", "audio/wav", 1100)
+            self.assertNotIn("closed", reopened)
+            store.finish_practice(session["id"])
+            opened = store.reopen_practice(session["id"])
+            self.assertNotIn("closed", opened)
+            self.assertTrue(store.latest_states()["city-food"]["session_id"])
+            self.assertFalse(store.latest_states()["city-food"]["closed"])
+
+
 class RetellTests(unittest.TestCase):
     def test_retell_is_kept_and_listed_under_the_question(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -340,7 +425,19 @@ class RetellTests(unittest.TestCase):
                 session["id"],
                 index,
                 status="ready",
-                feedback={"natural": "I like noodles.", "natural_zh": "我喜欢面条。"},
+                feedback={
+                    "natural": "I like noodles.",
+                    "natural_zh": "我喜欢面条。",
+                    "chunks": [{"en": "I like", "role": "flow"}],
+                    "variants": [
+                        {
+                            "key": "simple",
+                            "en": "I like noodles.",
+                            "zh": "我喜欢面条。",
+                            "chunks": [{"en": "I like", "role": "flow"}],
+                        }
+                    ],
+                },
             )
             saved = store.save_retell(session["id"], index, b"webm-retell", "audio/webm")
             self.assertEqual(saved["turns"][0]["retell_file"], "turn-01-retell.webm")
@@ -358,6 +455,14 @@ class RetellTests(unittest.TestCase):
             self.assertEqual([item["index"] for item in lines], [1, 2])
             self.assertEqual(lines[0]["natural"], "I like noodles.")
             self.assertTrue(lines[0]["has_retell"])
+            self.assertEqual(lines[0]["chunks"], [
+                {"en": "I like", "role": "flow", "scope": "main", "number": 0, "has_retell": False},
+                {"en": "I like", "role": "flow", "scope": "simple", "number": 0, "has_retell": False},
+            ])
+            self.assertEqual(lines[0]["sources"]["main"]["en"], "I like noodles.")
+            self.assertEqual(lines[0]["sources"]["simple"]["en"], "I like noodles.")
+            self.assertFalse(lines[0]["sources"]["main"]["has_speech"])
+            self.assertEqual(lines[1]["chunks"], [])
             replaced = store.update_turn(
                 session["id"],
                 index,
@@ -365,6 +470,93 @@ class RetellTests(unittest.TestCase):
             )
             self.assertNotIn("retell_file", replaced["turns"][0])
             self.assertFalse(path.exists())
+
+    def test_drop_retell_removes_only_the_shadow_take(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp))
+            session = store.create({"id": "city-food", "en": "What food?", "zh": "吃什么？"})
+            session, index = store.append_audio(session["id"], b"RIFFanswer", "audio/wav", 1000)
+            store.update_turn(
+                session["id"],
+                index,
+                status="ready",
+                feedback={"natural": "I like noodles.", "natural_zh": "我喜欢面条。"},
+            )
+            saved = store.save_retell(session["id"], index, b"webm-retell", "audio/webm")
+            audio_name = saved["turns"][0]["audio_file"]
+            path, _mime = store.retell_path(session["id"], index)
+            cleared = store.drop_retell(session["id"], index)
+            turn = cleared["turns"][0]
+            self.assertNotIn("retell_file", turn)
+            self.assertNotIn("retell_mime", turn)
+            self.assertFalse(path.exists())
+            self.assertEqual(turn["audio_file"], audio_name)
+            self.assertTrue((Path(tmp) / session["id"] / audio_name).is_file())
+
+    def test_variant_speech_and_retell_stay_on_that_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp))
+            session = store.create({"id": "city-food", "en": "What food?", "zh": "吃什么？"})
+            session, index = store.append_audio(session["id"], b"RIFFanswer", "audio/wav", 1000)
+            variants = [
+                {"key": "simple", "en": "I like noodles.", "zh": "我喜欢面条。"},
+                {"key": "native", "en": "I'm into noodles.", "zh": "我挺爱吃面。"},
+            ]
+            store.update_turn(
+                session["id"],
+                index,
+                status="ready",
+                feedback={"natural": "I like noodles.", "variants": variants},
+            )
+            spoken = store.save_variant_speech(session["id"], index, "simple", b"RIFFsimple", "I like noodles.")
+            simple = spoken["turns"][0]["feedback"]["variants"][0]
+            self.assertEqual(simple["speech_file"], "turn-01-speech-simple.wav")
+            kept = store.keep_existing_variant_speech(session["id"], index, "simple")
+            self.assertEqual(kept["turns"][0]["feedback"]["variants"][0]["speech_file"], "turn-01-speech-simple.wav")
+            saved = store.save_variant_retell(session["id"], index, "simple", b"webm-simple", "audio/webm")
+            simple = saved["turns"][0]["feedback"]["variants"][0]
+            self.assertEqual(simple["retell_file"], "turn-01-retell-simple.webm")
+            self.assertNotIn("retell_file", saved["turns"][0]["feedback"]["variants"][1])
+            path, _mime = store.variant_retell_path(session["id"], index, "simple")
+            cleared = store.drop_variant_retell(session["id"], index, "simple")
+            self.assertNotIn("retell_file", cleared["turns"][0]["feedback"]["variants"][0])
+            self.assertFalse(path.exists())
+            speech_path, _mime = store.variant_speech_path(session["id"], index, "simple")
+            self.assertTrue(speech_path.is_file())
+            replaced = store.update_turn(
+                session["id"],
+                index,
+                feedback={"natural": "I like rice.", "variants": []},
+            )
+            self.assertEqual(replaced["turns"][0]["feedback"]["variants"], [])
+            self.assertFalse(speech_path.exists())
+
+    def test_chunk_retell_stays_on_that_piece(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp))
+            session = store.create({"id": "city-food", "en": "What food?", "zh": "吃什么？"})
+            session, index = store.append_audio(session["id"], b"RIFFanswer", "audio/wav", 1000)
+            store.update_turn(
+                session["id"],
+                index,
+                status="ready",
+                feedback={
+                    "natural": "I like noodles.",
+                    "chunks": [{"en": "I like", "zh": "表达喜欢"}],
+                    "variants": [{"key": "simple", "en": "I like noodles.", "zh": "我喜欢面条。", "chunks": [{"en": "I like", "zh": "表达喜欢"}]}],
+                },
+            )
+            saved = store.save_chunk_retell(session["id"], index, "main", 0, b"webm-chunk", "audio/webm")
+            chunk = saved["turns"][0]["feedback"]["chunks"][0]
+            self.assertEqual(chunk["retell_file"], "turn-01-retell-main-c0.webm")
+            self.assertNotIn("retell_file", saved["turns"][0])
+            path, _mime = store.chunk_retell_path(session["id"], index, "main", 0)
+            cleared = store.drop_chunk_retell(session["id"], index, "main", 0)
+            self.assertNotIn("retell_file", cleared["turns"][0]["feedback"]["chunks"][0])
+            self.assertFalse(path.exists())
+            variant = store.save_chunk_retell(session["id"], index, "simple", 0, b"webm-simple", "audio/webm")
+            simple = variant["turns"][0]["feedback"]["variants"][0]["chunks"][0]
+            self.assertEqual(simple["retell_file"], "turn-01-retell-simple-c0.webm")
 
 
 class QuestionTests(unittest.TestCase):

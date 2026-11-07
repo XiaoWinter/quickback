@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Quickback</title>
-    <link rel="stylesheet" href="/static/app.css?v=21">
+    <link rel="stylesheet" href="/static/app.css?v=51">
 </head>
 <body>
   <div class="page">
@@ -33,10 +33,13 @@
       <section id="turns"></section>
       <section id="next-prompt" class="card prompt"></section>
       <section id="recorder" class="recorder">
-        <button type="button" id="record" class="record">开始说</button>
+        <div class="record-row">
+          <button type="button" id="record" class="record">开始说</button>
+          <button type="button" id="finish-practice" class="finish" hidden>归档</button>
+        </div>
         <div id="take-review" class="take-review" hidden>
           <p id="take-hint" class="hint">这段还在本机。听一遍，满意再送出。</p>
-          <audio id="take-audio" controls></audio>
+          <div id="take-audio"></div>
           <div class="take-actions">
             <button type="button" id="send-take" class="primary">就用这段</button>
             <button type="button" id="redo-take" class="text-btn">重说</button>
@@ -76,7 +79,7 @@
       </div>
     </div>
   </div>
-  <script src="/static/questions.js?v=11"></script>
-  <script src="/static/app.js?v=22"></script>
+  <script src="/static/questions.js?v=25"></script>
+  <script src="/static/app.js?v=54"></script>
 </body>
 </html>

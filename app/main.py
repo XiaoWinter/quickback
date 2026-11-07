@@ -32,10 +32,10 @@ _speech_locks: dict[tuple[str, int], object] = {}
 _speech_lock_guard = threading.Lock()
 
 
-def _turn_speech_lock(session_id: str, index: int):
+def _turn_speech_lock(session_id: str, index: int, level: str = ""):
     import asyncio
 
-    key = (session_id, index)
+    key = (session_id, index, level)
     with _speech_lock_guard:
         lock = _speech_locks.get(key)
         if lock is None:
@@ -152,9 +152,15 @@ def provider_put(payload: dict):
 @app.get("/api/questions")
 def questions_list():
     try:
-        return backfill_timestamps()
+        questions = backfill_timestamps()
     except QuestionError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    states = store.latest_states()
+    for item in questions:
+        state = states.get(item["id"]) or {}
+        item["closed"] = bool(state.get("closed"))
+        item["session_id"] = state.get("session_id") or ""
+    return questions
 
 
 @app.post("/api/questions")
@@ -316,6 +322,24 @@ def session_turn_delete(session_id: str, index: int):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/sessions/{session_id}/reopen")
+def session_reopen(session_id: str):
+    try:
+        return store.reopen_practice(session_id)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这条记录。") from exc
+
+
+@app.post("/api/sessions/{session_id}/finish")
+def session_finish(session_id: str):
+    try:
+        return store.finish_practice(session_id)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这条记录。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.delete("/api/sessions/{session_id}/follow-up")
 def session_clear_follow_up(session_id: str):
     try:
@@ -344,7 +368,7 @@ async def create_speech(session_id: str, index: int):
             raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
         natural = str((turn.get("feedback") or {}).get("natural") or "").strip()
         if not natural:
-            raise HTTPException(status_code=400, detail="还没有地道版，不能生成发音。")
+            raise HTTPException(status_code=400, detail="还没有修正版，不能生成发音。")
         try:
             client = _client()
         except ModelError as exc:
@@ -358,6 +382,61 @@ async def create_speech(session_id: str, index: int):
             raise HTTPException(status_code=502, detail=detail) from exc
         log.info("speech %s/%s saved %s bytes", session_id, index, len(audio))
         return store.save_speech(session_id, index, audio, natural)
+
+
+@app.post("/api/sessions/{session_id}/turns/{index}/speech/{level}")
+async def create_variant_speech(session_id: str, index: int, level: str):
+    import asyncio
+
+    async with _turn_speech_lock(session_id, index, level):
+        try:
+            saved = store.keep_existing_variant_speech(session_id, index, level)
+        except NotFound as exc:
+            raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+        except StorageError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if saved is not None:
+            return saved
+        try:
+            session = store.get(session_id)
+            turn = next(item for item in session["turns"] if item["index"] == index)
+        except (NotFound, StopIteration) as exc:
+            raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+        item = next(
+            (
+                variant
+                for variant in ((turn.get("feedback") or {}).get("variants") or [])
+                if isinstance(variant, dict) and variant.get("key") == level
+            ),
+            None,
+        )
+        text = str((item or {}).get("en") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="还没有这句表达，不能生成发音。")
+        try:
+            client = _client()
+        except ModelError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            audio = await asyncio.to_thread(client.speak, text)
+        except ModelError as exc:
+            log.info("speech %s/%s/%s failed: %s", session_id, index, level, exc)
+            detail = str(exc).replace("录音已留下，可以点重试。", "稍后再打开这条记录。")
+            detail = detail.replace("录音已留下，过一会儿点重试。", "稍后再打开这条记录。")
+            raise HTTPException(status_code=502, detail=detail) from exc
+        log.info("speech %s/%s/%s saved %s bytes", session_id, index, level, len(audio))
+        return store.save_variant_speech(session_id, index, level, audio, text)
+
+
+@app.get("/api/sessions/{session_id}/speech/{index}/{level}")
+def get_variant_speech(session_id: str, index: int, level: str):
+    try:
+        path, mime = store.variant_speech_path(session_id, index, level)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="还没有这段发音。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/sessions/{session_id}/speech/{index}")
@@ -388,6 +467,105 @@ async def save_retell(
         raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
     except StorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _read_retell_upload(data: bytes, mime: str):
+    if len(data) < MIN_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="录音太短了，再说长一点。")
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="这段录音太长了，控制在 3 分钟内。")
+    return mime
+
+
+@app.post("/api/sessions/{session_id}/turns/{index}/retell/{scope}/chunks/{number}")
+async def save_chunk_retell(
+    session_id: str,
+    index: int,
+    scope: str,
+    number: int,
+    audio: UploadFile = File(...),
+    mime_type: str | None = Form(None),
+):
+    data = await audio.read()
+    mime = _read_retell_upload(data, normalize_mime(mime_type or audio.content_type))
+    try:
+        return store.save_chunk_retell(session_id, index, scope, number, data, mime)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/sessions/{session_id}/turns/{index}/retell/{scope}/chunks/{number}")
+def delete_chunk_retell(session_id: str, index: int, scope: str, number: int):
+    try:
+        return store.drop_chunk_retell(session_id, index, scope, number)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="还没有这段跟读。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/sessions/{session_id}/retell/{index}/{scope}/chunks/{number}")
+def get_chunk_retell(session_id: str, index: int, scope: str, number: int):
+    try:
+        path, mime = store.chunk_retell_path(session_id, index, scope, number)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="还没有这段跟读。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/sessions/{session_id}/turns/{index}/retell/{level}")
+async def save_variant_retell(
+    session_id: str,
+    index: int,
+    level: str,
+    audio: UploadFile = File(...),
+    mime_type: str | None = Form(None),
+):
+    data = await audio.read()
+    if len(data) < MIN_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="录音太短了，再说长一点。")
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="这段录音太长了，控制在 3 分钟内。")
+    mime = normalize_mime(mime_type or audio.content_type)
+    try:
+        return store.save_variant_retell(session_id, index, level, data, mime)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/sessions/{session_id}/turns/{index}/retell/{level}")
+def delete_variant_retell(session_id: str, index: int, level: str):
+    try:
+        return store.drop_variant_retell(session_id, index, level)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="还没有这段跟读。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/sessions/{session_id}/retell/{index}/{level}")
+def get_variant_retell(session_id: str, index: int, level: str):
+    try:
+        path, mime = store.variant_retell_path(session_id, index, level)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="还没有这段跟读。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
+
+
+@app.delete("/api/sessions/{session_id}/turns/{index}/retell")
+def delete_retell(session_id: str, index: int):
+    try:
+        return store.drop_retell(session_id, index)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="还没有这段跟读。") from exc
 
 
 @app.get("/api/sessions/{session_id}/retell/{index}")

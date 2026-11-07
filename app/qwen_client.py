@@ -194,7 +194,7 @@ class QwenClient:
     def speak(self, text: str) -> bytes:
         spoken = " ".join((text or "").split())
         if not spoken:
-            raise ModelError("没有可以朗读的地道版。")
+            raise ModelError("没有可以朗读的修正版。")
         if len(spoken) > 600:
             spoken = spoken[:600].rsplit(" ", 1)[0]
         payload = self._post(
@@ -210,14 +210,14 @@ class QwenClient:
         )
         url = usable_audio_url(audio_url_from_qwen(payload))
         if not url:
-            raise ModelError("没有生成发音。地道版还在，可以稍后再试。")
+            raise ModelError("没有生成发音。修正版还在，可以稍后再试。")
         try:
             with urllib.request.urlopen(url, timeout=60) as response:
                 audio = response.read()
         except Exception as exc:
-            raise ModelError("没有生成发音。地道版还在，可以稍后再试。") from exc
+            raise ModelError("没有生成发音。修正版还在，可以稍后再试。") from exc
         if not audio:
-            raise ModelError("没有生成发音。地道版还在，可以稍后再试。")
+            raise ModelError("没有生成发音。修正版还在，可以稍后再试。")
         return audio
 
     def _post(self, url: str, payload: dict) -> dict:
