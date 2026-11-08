@@ -37,7 +37,7 @@ Return one JSON object and nothing else. Use this shape:
   "variants": {{
     "simple": {{"en": "the whole answer in the easiest English", "zh": "这句的简体中文", "chunks": [{{"en": "a frame copied from simple", "role": "flow"}}]}},
     "professional": {{"en": "the whole answer, precise and complete", "zh": "这句的简体中文", "chunks": [{{"en": "a frame copied from professional", "role": "pivot"}}]}},
-    "native": {{"en": "the whole answer as a native would say it", "zh": "这句的简体中文", "chunks": [{{"en": "a frame copied from native", "role": "refactor"}}]}}
+    "native": {{"en": "the whole answer as a native would say it", "zh": "这句的简体中文", "chunks": [{{"en": "a frame copied from native", "role": "refactor"}}], "cores": [{{"en": "rubbed off on me", "usage": "一句简体中文，说明这个说法怎么用", "cue": "一句简体中文，给一个新情境让他们用这个说法造句"}}]}}
   }},
   "extensions": [{{"line": "one extra English sentence", "note": "一句简体中文"}}],
   "follow_up": "one English question",
@@ -73,6 +73,8 @@ Rules for variants:
 - The three wordings must differ. Do not copy natural into all three.
 - en is English only. zh translates that en into Simplified Chinese.
 - Each variant has its own chunks, copied from that variant's en. Use the same chunk rules.
+- simple, professional, and native must each have chunks when the line opens with a frame. A longer or more formal line still has frames. Do not leave professional or native as [].
+- Example: "I prefer animals with fluffy fur as they are soft." → chunks "I prefer" (flow), "as they are" (pivot). "I love fluffy animals because they're soft." → chunks "I love" (flow), "because they're" (pivot).
 
 Rules for chunks:
 - Treat the line as functional frames, not as separate words. A chunk is one multi-word frame copied from that version's English.
@@ -83,6 +85,16 @@ Rules for chunks:
 - refactor pulls the meaning back when the speaker corrects themselves, such as "Actually, I have" or "As a matter of fact".
 - Give a frame only when it is really there. If the line is only a fact, with no frame, chunks must be [].
 - Do not repeat the whole line. Do not add words that are not in that line. At most 4 frames.
+
+Rules for cores:
+- cores are the expressions worth keeping from that variant's en. simple, professional, and native each have their own list.
+- A core is a collocation, idiom, or grammar chunk copied from that exact line. It must be something a Chinese learner would not produce by translating word for word.
+- Good: "rubbed off on me", "pretty much stuck", "much of", "as a matter of fact".
+- Not a core: "I like", "my grandpa was", "in the village", "so I", "but consistently", a functional frame, or one content word.
+- Copy the words exactly. Do not invent an expression that is not in the line. 2 to 6 words. At most 3.
+- If the line has none, cores must be []. simple often has none. native and professional should include one when the line really has one.
+- usage is one or two Simplified Chinese sentences: the meaning, when to use it, and how it differs from the Chinese-style wording.
+- cue is one Simplified Chinese sentence. It gives a new situation and asks them to say a new sentence with this chunk. Do not translate the original line. Do not include the English chunk.
 
 Rules for spoken_zh and natural_zh:
 - spoken_zh translates the verbatim answer into Simplified Chinese. Translate the English parts. Keep the meaning of the Chinese parts. Do not upgrade it into the natural answer.
@@ -126,4 +138,127 @@ Rules for review:
 - Two or three short sentences at most.
 - If the answer is already natural English and it actually answers the question, review must be "".
 - Never suggest a further improvement of an answer that is already the suggested version. Stop there.
+"""
+
+
+def build_chunk_repair_prompt(lines: list[tuple[str, str]]) -> str:
+    blocks = []
+    for key, en in lines:
+        blocks.append(f"{key}:\n\"\"\"{en}\"\"\"")
+    body = "\n\n".join(blocks)
+    return f"""These English rewrites are missing functional chunks.
+For each line, copy 2 to 4 frames from that exact text.
+
+A frame is a short opening or turning phrase. Stop before the concrete detail.
+"I like" is a frame. "I like cats" is not. "Actually, I have" is a frame. "two guinea pigs" is not.
+"My grandfather has" is a frame. "My grandfather has been a significant influence" is not.
+"And honestly" is a frame. "And honestly, that kind of calm" is not.
+Each frame is 2 or 3 words. Use 4 or 5 only for a fixed phrase such as "as a matter of fact".
+Each frame appears in that line and is not the whole line.
+role is flow, pivot, or refactor.
+flow opens a point. pivot turns or limits it, such as but, because, though, or so. refactor is the speaker correcting themselves, such as Actually or honestly.
+When the line contains but, because, though, so, or honestly, include that pivot or refactor.
+Do not return four subject-plus-verb openings. Do not leave a list empty when the line has an opening phrase.
+
+Return one JSON object and nothing else. Each key below maps to a list of {{"en": "the frame", "role": "flow"}}.
+
+{body}
+"""
+
+
+def build_core_repair_prompt(lines: list[tuple[str, str]]) -> str:
+    blocks = []
+    for key, en in lines:
+        blocks.append(f"{key}:\n\"\"\"{en}\"\"\"")
+    body = "\n\n".join(blocks)
+    return f"""These English rewrites need the expressions a Chinese learner would not produce by translating word for word.
+For each line, copy 1 to 3 chunks from that exact text.
+Good: "rubbed off on me", "pretty much stuck", "much of", "as a matter of fact".
+Not this: "I like", "my grandpa was", "in the village", "so I", "but consistently", or a bare subject plus verb.
+Copy the words exactly. 2 to 6 words. If the line has no such expression, return [].
+usage is one or two Simplified Chinese sentences: the meaning, when to use it, and how it differs from the Chinese-style wording.
+cue is one Simplified Chinese sentence. It gives a new situation and asks them to say a new sentence with this chunk. Do not translate the original line. Do not include the English chunk.
+
+Return one JSON object and nothing else. Each key below maps to a list of {{"en": "the chunk", "usage": "简体中文", "cue": "简体中文"}}.
+
+{body}
+"""
+
+
+def build_core_gloss_prompt(en: str, line: str) -> str:
+    return f"""The learner chose this English chunk to practice: "{en}"
+The sentence it belongs with:
+\"\"\"{line}\"\"\"
+Explain the chunk. If it appears in the sentence, explain that use. If it does not, explain the chunk on its own.
+usage is one or two Simplified Chinese sentences: the meaning, when to use it, and how it differs from translating word for word. At most 70 Chinese characters. Do not include English.
+cue is one Simplified Chinese sentence. It gives a new situation and asks them to say a new sentence with this chunk. Do not translate the original line. Do not include the English chunk. At most 40 Chinese characters.
+
+Return one JSON object and nothing else: {{"usage": "简体中文", "cue": "简体中文"}}
+"""
+
+
+def build_core_note_prompt(*, en: str, usage: str, transcript: str) -> str:
+    return f"""The learner is practicing this English chunk: "{en}"
+Usage already shown to them:
+{usage}
+They just said, transcribed:
+\"\"\"{transcript}\"\"\"
+The transcript already contains the chunk.
+Return one JSON object and nothing else: {{"note": "一句或两句简体中文"}}
+Check two things.
+1. Grammar of the whole sentence: tense, agreement, articles, word order, and whether a relative clause matches the main clause. If there is a real error, name that one spot and how to fix it. Do not say 使用正确.
+2. Whether this sentence uses the chunk the way the usage describes.
+If the grammar is fine and the chunk fits the usage, one short sentence is enough.
+Do not invent an error. Do not rewrite the whole sentence in English. Do not add a new expression.
+
+Example. Chunk: "rarely spoke". Sentence: "The man, who rarely spoke, is my grandpa."
+A right note: 语块用对了，但 rarely spoke 是过去的习惯，is 是现在，时态没对齐。要说他现在仍然话少，用 rarely speaks。
+"""
+
+
+def build_progress_prompt(
+    *,
+    topic_en: str,
+    topic_zh: str,
+    prompt_en: str,
+    prompt_zh: str,
+    transcript: str,
+    duration_ms: int | None,
+    earlier: list[tuple[str, str]],
+) -> str:
+    seconds = max(0, int(duration_ms or 0)) / 1000
+    history = ""
+    if earlier:
+        lines = []
+        for en, said in earlier[-4:]:
+            lines.append(f"Question: {en}\nAnswer: {said}")
+        history = "Earlier in this same run:\n" + "\n\n".join(lines) + "\n\n"
+    return f"""Score this spoken answer. The learner may mix English and Chinese.
+Topic: {topic_en}
+Topic in Chinese: {topic_zh}
+This question: {prompt_en}
+This question in Chinese: {prompt_zh}
+Recording length: {seconds:.1f} seconds
+{history}Transcript:
+\"\"\"{transcript}\"\"\"
+
+Give three integer scores from 0 to 100:
+- comprehensibility: a listener can tell what they mean. Chinese mixed in can still score high.
+- relevance: the answer responds to this question, not a different one.
+- fluency: restarts, repetition, and broken phrases in the transcript. Use the recording length too. A fragment that is too short for the question scores lower. Do not grade grammar as its own penalty.
+
+Each note is one short Simplified Chinese sentence. No praise, no English, no rewritten answer.
+
+Also point out concrete mistakes in fixes, at most 3.
+Each item copies a short wrong fragment from the transcript (spoken), gives only that replacement in English (better), and explains that one mistake in one short Simplified Chinese sentence (note).
+Cover grammar, word choice, tense, agreement, articles, and word order.
+Do not invent a mistake. Do not rewrite the whole answer. Do not turn Chinese they used on purpose into an error.
+If the answer has no such mistake, fixes is [].
+These fixes do not change the three scores.
+
+follow_up is one easy English question a friend would ask next, about a concrete detail they mentioned. Stay on the topic. Do not repeat an earlier question.
+follow_up_zh is a short Simplified Chinese gloss of follow_up.
+
+Return one JSON object and nothing else:
+{{"comprehensibility": 0, "relevance": 0, "fluency": 0, "comprehensibility_note": "简体中文", "relevance_note": "简体中文", "fluency_note": "简体中文", "fixes": [{{"spoken": "he go", "better": "he went", "note": "讲过去的事，用 went。"}}], "follow_up": "one English question", "follow_up_zh": "简体中文"}}
 """

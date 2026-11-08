@@ -7,8 +7,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import ROOT, settings
-from app.gemini_client import GeminiClient, ModelError
+from app.gemini_client import GeminiClient, ModelError, core_was_used
 from app.practice import PracticeStore
+from app.progress import ProgressStore
 from app.providers import CHOICES, providers
 from app.qwen_client import QwenClient
 from app.questions import (
@@ -46,6 +47,7 @@ def _turn_speech_lock(session_id: str, index: int, level: str = ""):
 app = FastAPI(title="Quickback")
 store = SessionStore(settings.data_dir)
 practice = PracticeStore()
+progress = ProgressStore(settings.data_dir.parent / "progress")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
@@ -156,10 +158,12 @@ def questions_list():
     except QuestionError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     states = store.latest_states()
+    charts = progress.charts()
     for item in questions:
         state = states.get(item["id"]) or {}
         item["closed"] = bool(state.get("closed"))
         item["session_id"] = state.get("session_id") or ""
+        item["progress"] = charts.get(item["id"]) or []
     return questions
 
 
@@ -187,7 +191,190 @@ def questions_remove(question_id: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     store.delete_for_question(question_id)
     practice.forget_question(question_id)
+    progress.delete_question(question_id)
     return {"ok": True}
+
+
+def _progress_page(question_id: str) -> dict:
+    try:
+        question = get_question(question_id)
+    except QuestionError as exc:
+        raise HTTPException(status_code=404, detail="没有这道题。") from exc
+    return progress.page(question)
+
+
+@app.get("/api/questions/{question_id}/progress")
+def progress_page(question_id: str):
+    return _progress_page(question_id)
+
+
+@app.post("/api/questions/{question_id}/progress")
+def progress_start(question_id: str):
+    try:
+        question = get_question(question_id)
+        progress.open_run(question)
+    except QuestionError as exc:
+        raise HTTPException(status_code=404, detail="没有这道题。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return progress.page(question)
+
+
+def _progress_question_page(question_id: str) -> dict:
+    return _progress_page(question_id)
+
+
+@app.post("/api/progress/{run_id}/drafts")
+def progress_draft_add(run_id: str, payload: dict):
+    try:
+        question_id = progress.add_draft(run_id, (payload or {}).get("text"))
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _progress_question_page(question_id)
+
+
+@app.delete("/api/progress/{run_id}/drafts/{index}")
+def progress_draft_remove(run_id: str, index: int):
+    try:
+        question_id = progress.remove_draft(run_id, index)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _progress_question_page(question_id)
+
+
+@app.post("/api/progress/{run_id}/answers")
+async def progress_answer(
+    run_id: str,
+    audio: UploadFile = File(...),
+    mime_type: str | None = Form(None),
+    duration_ms: int | None = Form(None),
+):
+    import asyncio
+
+    data = await audio.read()
+    if len(data) < MIN_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="录音太短了，再说长一点。")
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="这段录音太长了，控制在 3 分钟内。")
+    mime = normalize_mime(mime_type or audio.content_type)
+    try:
+        question_id = progress.save_pending(run_id, data, mime, duration_ms)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _score_progress(run_id, question_id)
+
+
+@app.post("/api/progress/{run_id}/retry")
+async def progress_retry(run_id: str):
+    try:
+        question_id = progress.scoring_context(run_id)["question_id"]
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _score_progress(run_id, question_id)
+
+
+@app.post("/api/progress/{run_id}/redo")
+def progress_redo(run_id: str):
+    try:
+        question_id = progress.clear_pending(run_id)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _progress_question_page(question_id)
+
+
+@app.post("/api/progress/{run_id}/finish")
+def progress_finish(run_id: str):
+    try:
+        question_id = progress.finish(run_id)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _progress_question_page(question_id)
+
+
+@app.delete("/api/progress/{run_id}")
+def progress_discard(run_id: str):
+    try:
+        question_id = progress.discard(run_id)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _progress_question_page(question_id)
+
+
+@app.get("/api/progress/{run_id}/audio/{number}")
+def progress_audio(run_id: str, number: int):
+    try:
+        path, mime = progress.audio_path(run_id, number)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
+
+
+async def _score_progress(run_id: str, question_id: str) -> dict:
+    import asyncio
+
+    try:
+        client = _client()
+        ctx = progress.scoring_context(run_id)
+    except ModelError as exc:
+        try:
+            progress.fail_pending(run_id, str(exc))
+        except (NotFound, StorageError):
+            pass
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    transcript = ctx["transcript"]
+    try:
+        if not transcript:
+            transcript = await asyncio.to_thread(client.transcribe, ctx["audio"], ctx["mime"])
+        if not str(transcript or "").strip():
+            progress.fail_pending(run_id, "没听清，再说一次。")
+            return _progress_question_page(question_id)
+        parsed = await asyncio.to_thread(
+            client.progress_score,
+            topic_en=ctx["topic_en"],
+            topic_zh=ctx["topic_zh"],
+            prompt_en=ctx["prompt_en"],
+            prompt_zh=ctx["prompt_zh"],
+            transcript=transcript,
+            duration_ms=ctx["duration_ms"],
+            earlier=ctx["earlier"],
+        )
+        progress.commit_answer(run_id, transcript, parsed)
+    except ModelError as exc:
+        log.info("progress %s failed: %s", run_id, exc)
+        try:
+            progress.fail_pending(run_id, str(exc), transcript or "")
+        except (NotFound, StorageError):
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return _progress_question_page(question_id)
+    except (NotFound, StorageError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("progress %s failed", run_id)
+        try:
+            progress.fail_pending(run_id, "评分中断了，可以点重试。", transcript or "")
+        except (NotFound, StorageError):
+            raise HTTPException(status_code=502, detail="评分中断了，可以点重试。") from exc
+        return _progress_question_page(question_id)
+    return _progress_question_page(question_id)
 
 
 def _practice_view() -> dict:
@@ -446,6 +633,87 @@ def get_speech(session_id: str, index: int):
     except NotFound as exc:
         raise HTTPException(status_code=404, detail="还没有这段发音。") from exc
     return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/sessions/{session_id}/turns/{index}/cores/{level}")
+async def add_core(session_id: str, index: int, level: str, payload: dict):
+    import asyncio
+
+    try:
+        en, line = store.prepare_core(session_id, index, level, str(payload.get("en") or ""))
+        client = _client()
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+    except (StorageError, ModelError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        usage, cue = await asyncio.to_thread(client.core_gloss, en, line)
+    except ModelError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if not usage or not cue:
+        raise HTTPException(status_code=502, detail="用法没写好，再试一次。")
+    try:
+        return store.add_core(session_id, index, level, en, usage, cue)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/sessions/{session_id}/turns/{index}/cores/{level}/{number}")
+def remove_core(session_id: str, index: int, level: str, number: int):
+    try:
+        return store.delete_core(session_id, index, level, number)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/sessions/{session_id}/turns/{index}/cores/{level}/{number}/{slot}")
+async def practice_core(
+    session_id: str,
+    index: int,
+    level: str,
+    number: int,
+    slot: int,
+    audio: UploadFile = File(...),
+    mime_type: str | None = Form(None),
+):
+    import asyncio
+
+    data = await audio.read()
+    if len(data) < MIN_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="录音太短了，再说长一点。")
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="这段录音太长了，控制在 3 分钟内。")
+    mime = normalize_mime(mime_type or audio.content_type)
+    try:
+        phrase = store.core_phrase(session_id, index, level, number)
+        client = _client()
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+    except (StorageError, ModelError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        transcript = await asyncio.to_thread(client.transcribe, data, mime)
+    except ModelError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if core_was_used(phrase["en"], transcript):
+        try:
+            note = await asyncio.to_thread(client.core_note, phrase["en"], phrase["usage"], transcript)
+        except ModelError:
+            note = "用上了。"
+        if not note:
+            note = "用上了。"
+    else:
+        note = f"这句里没有用上「{phrase['en']}」。按用法再说一句。"
+    try:
+        return store.save_core_attempt(session_id, index, level, number, slot, transcript, note)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/sessions/{session_id}/turns/{index}/retell")

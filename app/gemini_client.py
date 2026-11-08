@@ -4,7 +4,16 @@ import json
 import logging
 import re
 
-from app.prompts import build_feedback_prompt
+import zhconv
+
+from app.prompts import (
+    build_chunk_repair_prompt,
+    build_core_gloss_prompt,
+    build_core_note_prompt,
+    build_core_repair_prompt,
+    build_feedback_prompt,
+    build_progress_prompt,
+)
 
 log = logging.getLogger("quickback")
 _FEEDBACK_FALLBACKS = ("gemini-3.6-flash", "gemini-3.5-flash-lite")
@@ -98,11 +107,13 @@ def _variants(data: dict) -> list[dict]:
         en = str(item.get("en") or item.get("line") or "").strip()[:800]
         if not en:
             continue
+        chunks = _chunks_from(item.get("chunks"), en)
         items.append({
             "key": key,
             "en": en,
             "zh": str(item.get("zh") or "").strip()[:500],
-            "chunks": _chunks_from(item.get("chunks"), en),
+            "chunks": chunks,
+            "cores": _cores_from(item.get("cores"), en, chunks),
         })
     return items
 
@@ -120,6 +131,326 @@ _CHUNK_ROLES = {
 def _chunk_role(item: dict) -> str:
     raw = str(item.get("role") or item.get("intent") or "").strip().lower().replace("-", "_").replace(" ", "_")
     return _CHUNK_ROLES.get(raw, "")
+
+
+_CHUNK_REPAIR_LEVELS = ("professional", "native")
+
+
+def missing_variant_lines(feedback: dict) -> list[tuple[str, str]]:
+    lines = []
+    for item in feedback.get("variants") or []:
+        key = item.get("key")
+        en = str(item.get("en") or "").strip()
+        if key in _CHUNK_REPAIR_LEVELS and en and not item.get("chunks"):
+            lines.append((key, en))
+    return lines
+
+
+_FRAME_MARKERS = {
+    "but": "pivot",
+    "because": "pivot",
+    "though": "pivot",
+    "so": "pivot",
+    "honestly": "refactor",
+    "actually": "refactor",
+}
+_FRAME_LEADING = {"and"}
+_FRAME_FOLLOW = {"i", "they", "they're", "we", "it", "my", "me", "you", "he", "she", "not", "consistently"}
+
+
+def _token_key(token: str) -> str:
+    return (token or "").lower().replace("’", "'")
+
+
+def _frame_tokens(text: str) -> list[tuple[str, int, int]]:
+    return [
+        (match.group(), match.start(), match.end())
+        for match in re.finditer(r"[A-Za-z]+(?:['’][A-Za-z]+)?", text or "")
+    ]
+
+
+def _short_slice(source: str, en: str) -> str:
+    words = (en or "").split()
+    if not words:
+        return ""
+    limit = 3 if len(words) > 3 else len(words)
+    if limit == 3 and _token_key(words[2]) in {"a", "an", "the", "my"}:
+        limit = 2
+    wanted = _normalize_answer(" ".join(words[:limit]))
+    tokens = _frame_tokens(source)
+    normalized = [_normalize_answer(token) for token, _start, _end in tokens]
+    size = len(wanted.split())
+    for index in range(len(tokens) - size + 1):
+        if normalized[index:index + size] == wanted.split():
+            start = tokens[index][1]
+            end = tokens[index + size - 1][2]
+            return source[start:end]
+    return ""
+
+
+def _marker_slices(source: str) -> list[tuple[int, str, str]]:
+    tokens = _frame_tokens(source)
+    found = []
+    for index, (token, start, end) in enumerate(tokens):
+        role = _FRAME_MARKERS.get(_token_key(token))
+        if not role:
+            continue
+        if index > 0 and _token_key(tokens[index - 1][0]) in _FRAME_LEADING:
+            start = tokens[index - 1][1]
+        if index + 1 < len(tokens) and _token_key(tokens[index + 1][0]) in _FRAME_FOLLOW:
+            end = tokens[index + 1][2]
+        found.append((start, source[start:end], role))
+    return found
+
+
+def _refine_frames(source: str, chunks: list[dict]) -> list[dict]:
+    kept = []
+    for chunk in chunks:
+        short = _short_slice(source, chunk.get("en") or "")
+        if not short:
+            continue
+        role = chunk.get("role") if chunk.get("role") in {"flow", "pivot", "refactor"} else "flow"
+        kept.append((source.lower().find(short.lower()), short, role))
+    flows = [item for item in kept if item[2] == "flow"][:2]
+    spans = flows + [item for item in kept if item[2] != "flow"]
+    for start, text, role in _marker_slices(source):
+        if any(text.lower() in item[1].lower() or item[1].lower() in text.lower() for item in spans):
+            continue
+        spans.append((start, text, role))
+    spans.sort(key=lambda item: item[0])
+    while len(spans) > 4:
+        flow_at = next((index for index in range(len(spans) - 1, -1, -1) if spans[index][2] == "flow"), None)
+        spans.pop(flow_at if flow_at is not None else -1)
+    refined = [{"en": text, "role": role} for _start, text, role in spans]
+    return _chunks_from(refined, source)
+
+
+_CORE_LEVELS = ("professional", "native")
+
+
+def missing_core_lines(feedback: dict) -> list[tuple[str, str]]:
+    lines = []
+    for item in feedback.get("variants") or []:
+        key = item.get("key")
+        en = str(item.get("en") or "").strip()
+        if key in _CORE_LEVELS and en and not item.get("cores"):
+            lines.append((key, en))
+    return lines
+
+
+def _exact_phrase(source: str, en: str) -> str:
+    wanted = _normalize_answer(en).split()
+    if len(wanted) < 2 or len(wanted) > 6:
+        return ""
+    tokens = _frame_tokens(source)
+    normalized = [_normalize_answer(token) for token, _start, _end in tokens]
+    size = len(wanted)
+    for index in range(len(tokens) - size + 1):
+        if normalized[index:index + size] == wanted:
+            start = tokens[index][1]
+            end = tokens[index + size - 1][2]
+            return source[start:end]
+    return ""
+
+
+def _cores_from(raw, source: str, chunks: list | None = None) -> list[dict]:
+    source_norm = _normalize_answer(source)
+    if not source_norm or not isinstance(raw, list):
+        return []
+    blocked = set()
+    for chunk in chunks or []:
+        if isinstance(chunk, dict):
+            blocked.add(_normalize_answer(str(chunk.get("en") or "")))
+    found = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        usage = str(item.get("usage") or "").strip()
+        cue = str(item.get("cue") or "").strip()
+        if not usage or not cue:
+            continue
+        if not re.search(r"[\u3400-\u9fff]", usage) or not re.search(r"[\u3400-\u9fff]", cue):
+            continue
+        phrase = _exact_phrase(source, str(item.get("en") or ""))
+        if not phrase:
+            continue
+        key = _normalize_answer(phrase)
+        if not key or key in seen or key in blocked or key == source_norm:
+            continue
+        seen.add(key)
+        found.append((source.lower().find(phrase.lower()), {
+            "en": phrase[:80],
+            "usage": usage[:180],
+            "cue": cue[:120],
+        }))
+    found.sort(key=lambda item: item[0] if item[0] >= 0 else 10**9)
+    return [item for _at, item in found[:3]]
+
+
+def merge_variant_cores(feedback: dict, raw: dict) -> dict:
+    """Fill native and professional core lists that came back empty."""
+    if not isinstance(raw, dict):
+        return feedback
+    for item in feedback.get("variants") or []:
+        if item.get("cores"):
+            continue
+        key = item.get("key")
+        if key not in _CORE_LEVELS:
+            continue
+        source = raw.get(key)
+        if isinstance(source, dict):
+            source = source.get("cores")
+        filled = _cores_from(source, item.get("en") or "", item.get("chunks") or [])
+        if filled:
+            item["cores"] = filled
+    return feedback
+
+
+def core_was_used(phrase: str, transcript: str) -> bool:
+    needle = _normalize_answer(phrase)
+    hay = _normalize_answer(transcript)
+    return bool(needle) and needle in hay
+
+
+def gloss_from_core_response(text: str) -> tuple[str, str]:
+    raw = _FENCE.sub("", (text or "").strip())
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return "", ""
+    if not isinstance(data, dict):
+        return "", ""
+    usage = _clip_zh(zhconv.convert(str(data.get("usage") or ""), "zh-cn"), 180)
+    cue = _clip_zh(zhconv.convert(str(data.get("cue") or ""), "zh-cn"), 120)
+    if not _ZH.search(usage) or not _ZH.search(cue):
+        return "", ""
+    return usage, cue
+
+
+def _clip_zh(text: str, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    at = max(cut.rfind(mark) for mark in ("。", "！", "？", "，"))
+    if at >= 12:
+        return cut[: at + 1]
+    return cut
+
+
+_ZH = re.compile(r"[\u3400-\u9fff]")
+
+
+def note_from_core_response(text: str) -> str:
+    raw = _FENCE.sub("", (text or "").strip())
+    note = ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = None
+    if isinstance(data, dict):
+        note = str(data.get("note") or "").strip()
+    elif raw and not raw.startswith("{"):
+        note = raw
+    return note[:240]
+
+
+def _progress_fixes(raw, transcript: str) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    source = _normalize_answer(transcript)
+    source_words = source.split()
+    found = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        spoken = " ".join(str(item.get("spoken") or "").split())
+        better = " ".join(str(item.get("better") or "").split())
+        spoken_norm = _normalize_answer(spoken)
+        better_norm = _normalize_answer(better)
+        words = spoken_norm.split()
+        if (
+            not spoken_norm
+            or not better_norm
+            or not re.search(r"[A-Za-z]", better)
+            or not words
+            or len(words) > 12
+            or len(better_norm.split()) > 16
+            or spoken_norm not in source
+            or spoken_norm == better_norm
+            or spoken_norm in seen
+        ):
+            continue
+        if spoken_norm == source and len(source_words) > 12:
+            continue
+        seen.add(spoken_norm)
+        note = _clip_zh(zhconv.convert(str(item.get("note") or ""), "zh-cn"), 120)
+        if not _ZH.search(note):
+            note = ""
+        found.append({"spoken": spoken[:120], "better": better[:160], "note": note})
+        if len(found) >= 3:
+            break
+    return found
+
+
+def parse_progress_score(text: str, transcript: str = "") -> dict:
+    raw = _FENCE.sub("", (text or "").strip())
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ModelError("这次没评上分，可以点重试。") from exc
+    if not isinstance(data, dict):
+        raise ModelError("这次没评上分，可以点重试。")
+
+    def score(value) -> int:
+        if isinstance(value, str) and re.fullmatch(r"-?\d+(?:\.\d+)?", value.strip()):
+            value = float(value.strip())
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ModelError("这次没评上分，可以点重试。")
+        number = float(value)
+        if number != number or number in (float("inf"), float("-inf")):
+            raise ModelError("这次没评上分，可以点重试。")
+        rounded = int(number + 0.5) if number >= 0 else 0
+        return max(0, min(100, rounded))
+
+    keys = ("comprehensibility", "relevance", "fluency")
+    scores = {key: score(data.get(key)) for key in keys}
+    notes = {}
+    for key in keys:
+        note = _clip_zh(zhconv.convert(str(data.get(f"{key}_note") or ""), "zh-cn"), 160)
+        notes[key] = note if _ZH.search(note) else ""
+    follow = " ".join(str(data.get("follow_up") or "").split())
+    if not re.search(r"[A-Za-z]", follow):
+        follow = ""
+    follow_zh = _clip_zh(zhconv.convert(str(data.get("follow_up_zh") or ""), "zh-cn"), 160)
+    if not _ZH.search(follow_zh):
+        follow_zh = ""
+    return {
+        "scores": scores,
+        "notes": notes,
+        "fixes": _progress_fixes(data.get("fixes"), transcript),
+        "follow_up": follow[:240],
+        "follow_up_zh": follow_zh,
+    }
+
+
+def merge_variant_chunks(feedback: dict, raw: dict) -> dict:
+    """Fill variant chunk lists that came back empty. Leave lists that already have frames."""
+    if not isinstance(raw, dict):
+        return feedback
+    for item in feedback.get("variants") or []:
+        if item.get("chunks"):
+            continue
+        key = item.get("key")
+        source = raw.get(key)
+        if isinstance(source, dict):
+            source = source.get("chunks")
+        filled = _refine_frames(item.get("en") or "", _chunks_from(source, item.get("en") or ""))
+        if filled:
+            item["chunks"] = filled
+    return feedback
 
 
 def _chunks_from(raw, source: str) -> list[dict]:
@@ -344,6 +675,124 @@ class GeminiClient:
             raise GeminiError("没有听清。录音已留下，可以再说一次，或点重试。")
         return text
 
+    def _repair_variant_chunks(self, parsed: dict) -> None:
+        missing = missing_variant_lines(parsed)
+        if not missing:
+            return
+        _genai, types = _sdk()
+        client = self._client_or_create()
+        try:
+            response = client.models.generate_content(
+                model=self.feedback_model,
+                contents=build_chunk_repair_prompt(missing),
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    response_mime_type="application/json",
+                ),
+            )
+        except Exception:
+            return
+        text = _response_text(response)
+        if not text:
+            return
+        try:
+            data = json.loads(_FENCE.sub("", text))
+        except json.JSONDecodeError:
+            return
+        merge_variant_chunks(parsed, data)
+
+    def _repair_variant_cores(self, parsed: dict) -> None:
+        missing = missing_core_lines(parsed)
+        if not missing:
+            return
+        _genai, types = _sdk()
+        client = self._client_or_create()
+        try:
+            response = client.models.generate_content(
+                model=self.feedback_model,
+                contents=build_core_repair_prompt(missing),
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    response_mime_type="application/json",
+                ),
+            )
+        except Exception:
+            return
+        text = _response_text(response)
+        if not text:
+            return
+        try:
+            data = json.loads(_FENCE.sub("", text))
+        except json.JSONDecodeError:
+            return
+        merge_variant_cores(parsed, data)
+
+    def core_gloss(self, en: str, line: str) -> tuple[str, str]:
+        _genai, types = _sdk()
+        client = self._client_or_create()
+        try:
+            response = client.models.generate_content(
+                model=self.feedback_model,
+                contents=build_core_gloss_prompt(en, line),
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    response_mime_type="application/json",
+                ),
+            )
+        except Exception as exc:
+            raise GeminiError(_friendly(exc)) from exc
+        return gloss_from_core_response(_response_text(response))
+
+    def core_note(self, en: str, usage: str, transcript: str) -> str:
+        _genai, types = _sdk()
+        client = self._client_or_create()
+        try:
+            response = client.models.generate_content(
+                model=self.feedback_model,
+                contents=build_core_note_prompt(en=en, usage=usage, transcript=transcript),
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    response_mime_type="application/json",
+                ),
+            )
+        except Exception as exc:
+            raise GeminiError(_friendly(exc)) from exc
+        return note_from_core_response(_response_text(response))
+
+    def progress_score(
+        self,
+        *,
+        topic_en: str,
+        topic_zh: str,
+        prompt_en: str,
+        prompt_zh: str,
+        transcript: str,
+        duration_ms: int | None,
+        earlier: list[tuple[str, str]],
+    ) -> dict:
+        _genai, types = _sdk()
+        client = self._client_or_create()
+        try:
+            response = client.models.generate_content(
+                model=self.feedback_model,
+                contents=build_progress_prompt(
+                    topic_en=topic_en,
+                    topic_zh=topic_zh,
+                    prompt_en=prompt_en,
+                    prompt_zh=prompt_zh,
+                    transcript=transcript,
+                    duration_ms=duration_ms,
+                    earlier=earlier,
+                ),
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    response_mime_type="application/json",
+                ),
+            )
+        except Exception as exc:
+            raise GeminiError(_friendly(exc)) from exc
+        return parse_progress_score(_response_text(response), transcript)
+
     def feedback(
         self,
         *,
@@ -389,8 +838,11 @@ class GeminiClient:
             text = _response_text(response)
             if not text:
                 raise GeminiError("这次没有生成反馈。录音已留下，可以点重试。")
+            parsed = parse_feedback(text)
+            self._repair_variant_chunks(parsed)
+            self._repair_variant_cores(parsed)
             return apply_review_policy(
-                parse_feedback(text),
+                parsed,
                 transcript,
                 previous_natural,
                 previous_natural_zh,

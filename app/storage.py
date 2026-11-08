@@ -17,6 +17,7 @@ _CHUNK_RETELL = re.compile(r"^turn-\d{2}-retell-(?:main|simple|professional|nati
 _CHUNK_SCOPES = ("main", "simple", "professional", "native")
 _ECHO_ROLES = frozenset({"flow", "pivot", "refactor"})
 _ECHO_CHUNK_ORDER = ("simple", "native", "professional")
+_CORE_MAX = 8
 
 EXT_BY_MIME = {
     "audio/webm": ".webm",
@@ -29,6 +30,10 @@ EXT_BY_MIME = {
 }
 
 
+def _core_key(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9']+", " ", (text or "").lower().replace("’", "'")).split())
+
+
 class StorageError(Exception):
     pass
 
@@ -39,6 +44,18 @@ class NotFound(StorageError):
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def normalize_core_phrase(en: str) -> str:
+    en = " ".join(str(en or "").split())
+    if not en:
+        raise StorageError("先写语块。")
+    if re.search(r"[\u3400-\u9fff]", en):
+        raise StorageError("语块用英文写。")
+    words = re.findall(r"[A-Za-z]+(?:['’][A-Za-z]+)?", en)
+    if len(words) < 2 or len(words) > 8 or len(en) > 80:
+        raise StorageError("语块写成 2 到 8 个英文词。")
+    return en
 
 
 def _prompt_text(en: str, zh: str) -> tuple[str, str]:
@@ -86,6 +103,60 @@ def _echo_chunks(feedback: dict, folder: Path) -> list[dict]:
     by_key = _variants_by_key(feedback)
     for key in _ECHO_CHUNK_ORDER:
         found.extend(_listed_chunks(by_key.get(key) or {}, key, folder))
+    return found
+
+
+def _core_attempts(core: dict) -> list[dict]:
+    raw = core.get("attempts")
+    if not isinstance(raw, list):
+        old = core.get("attempt")
+        raw = [old] if isinstance(old, dict) else []
+    found = []
+    for slot, item in enumerate(list(raw)[:3]):
+        if not isinstance(item, dict):
+            continue
+        transcript = " ".join(str(item.get("transcript") or "").split())
+        if not transcript:
+            continue
+        found.append(
+            {
+                "slot": slot,
+                "transcript": transcript[:500],
+                "note": " ".join(str(item.get("note") or "").split())[:240],
+            }
+        )
+    return found
+
+
+def _listed_cores(owner: dict, scope: str) -> list[dict]:
+    raw = owner.get("cores") if isinstance(owner, dict) else None
+    if not isinstance(raw, list):
+        return []
+    listed = []
+    for number, core in enumerate(raw):
+        if not isinstance(core, dict):
+            continue
+        en = " ".join(str(core.get("en") or "").split())
+        if not en:
+            continue
+        listed.append(
+            {
+                "en": en,
+                "usage": " ".join(str(core.get("usage") or "").split()),
+                "cue": " ".join(str(core.get("cue") or "").split()),
+                "scope": scope,
+                "number": number,
+                "attempts": _core_attempts(core),
+            }
+        )
+    return listed
+
+
+def _echo_cores(feedback: dict) -> list[dict]:
+    by_key = _variants_by_key(feedback)
+    found = []
+    for key in _ECHO_CHUNK_ORDER:
+        found.extend(_listed_cores(by_key.get(key) or {}, key))
     return found
 
 
@@ -432,6 +503,138 @@ class SessionStore:
             self._write(session)
             return session
 
+    def fill_variant_cores(self, session_id: str, index: int, by_key: dict) -> dict:
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            feedback = turn.get("feedback")
+            if not isinstance(feedback, dict):
+                raise StorageError("还没有修正版。")
+            for item in feedback.get("variants") or []:
+                if not isinstance(item, dict):
+                    continue
+                key = item.get("key")
+                cores = by_key.get(key) if isinstance(by_key, dict) else None
+                if item.get("cores") or not isinstance(cores, list) or not cores:
+                    continue
+                item["cores"] = cores
+            self._write(session)
+            return session
+
+    def core_phrase(self, session_id: str, index: int, level: str, number: int) -> dict:
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            item = self._core_item(turn, self._level(level), number)
+            if not item:
+                raise StorageError("还没有这个语块。")
+            return {"en": str(item.get("en") or ""), "usage": str(item.get("usage") or "")}
+
+    def save_core_attempt(
+        self,
+        session_id: str,
+        index: int,
+        level: str,
+        number: int,
+        slot: int,
+        transcript: str,
+        note: str,
+    ) -> dict:
+        transcript = " ".join(str(transcript or "").split())[:500]
+        note = " ".join(str(note or "").split())[:240]
+        if not isinstance(slot, int) or isinstance(slot, bool) or slot < 0 or slot > 2:
+            raise StorageError("最多造三句。")
+        if not transcript:
+            raise StorageError("没有听清。再说一句。")
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            item = self._core_item(turn, self._level(level), number)
+            if not item:
+                raise StorageError("还没有这个语块。")
+            attempts = item.get("attempts")
+            if not isinstance(attempts, list):
+                old = item.get("attempt")
+                attempts = [old] if isinstance(old, dict) and str(old.get("transcript") or "").strip() else []
+            attempts = list(attempts[:3])
+            while len(attempts) < 3:
+                attempts.append(None)
+            attempts[slot] = {"transcript": transcript, "note": note}
+            item["attempts"] = attempts
+            item.pop("attempt", None)
+            self._write(session)
+            return session
+
+    def prepare_core(self, session_id: str, index: int, level: str, en: str) -> tuple[str, str]:
+        en = normalize_core_phrase(en)
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            owner = self._variant_item(turn, self._level(level))
+            if not isinstance(owner, dict):
+                raise StorageError("没有这一档表达。")
+            cores = owner.get("cores")
+            kept = [item for item in cores if isinstance(item, dict) and str(item.get("en") or "").strip()] if isinstance(cores, list) else []
+            if any(_core_key(str(item.get("en") or "")) == _core_key(en) for item in kept):
+                raise StorageError("这个语块已经有了。")
+            if len(kept) >= _CORE_MAX:
+                raise StorageError("这一档最多 8 个语块。")
+            return en, str(owner.get("en") or "").strip()
+
+    def add_core(self, session_id: str, index: int, level: str, en: str, usage: str, cue: str) -> dict:
+        en = normalize_core_phrase(en)
+        usage = " ".join(str(usage or "").split())
+        cue = " ".join(str(cue or "").split())
+        if not usage:
+            raise StorageError("语块和用法都要写。")
+        if len(usage) > 180 or len(cue) > 120:
+            raise StorageError("这句太长了。")
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            owner = self._variant_item(turn, self._level(level))
+            if not isinstance(owner, dict):
+                raise StorageError("没有这一档表达。")
+            cores = owner.get("cores")
+            if not isinstance(cores, list):
+                cores = []
+                owner["cores"] = cores
+            kept = [item for item in cores if isinstance(item, dict) and str(item.get("en") or "").strip()]
+            key = _core_key(en)
+            if any(_core_key(str(item.get("en") or "")) == key for item in kept):
+                raise StorageError("这个语块已经有了。")
+            if len(kept) >= _CORE_MAX:
+                raise StorageError("这一档最多 8 个语块。")
+            cores.append({"en": en, "usage": usage, "cue": cue})
+            self._write(session)
+            return session
+
+    def delete_core(self, session_id: str, index: int, level: str, number: int) -> dict:
+        with self._lock:
+            session = self._read(session_id)
+            turn = self._turn(session, index)
+            owner = self._variant_item(turn, self._level(level))
+            if not self._core_item(turn, self._level(level), number) or not isinstance(owner, dict):
+                raise StorageError("还没有这个语块。")
+            cores = owner.get("cores")
+            del cores[number]
+            self._write(session)
+            return session
+
+    def _core_item(self, turn: dict, level: str, number: int) -> dict | None:
+        if not isinstance(number, int) or isinstance(number, bool) or number < 0 or number > _CORE_MAX - 1:
+            return None
+        owner = self._variant_item(turn, level)
+        if not isinstance(owner, dict):
+            return None
+        cores = owner.get("cores")
+        if not isinstance(cores, list) or number >= len(cores):
+            return None
+        item = cores[number]
+        if not isinstance(item, dict) or not str(item.get("en") or "").strip():
+            return None
+        return item
+
     def save_retell(self, session_id: str, index: int, data: bytes, mime: str) -> dict:
         mime = normalize_mime(mime)
         ext = EXT_BY_MIME.get(mime)
@@ -650,6 +853,9 @@ class SessionStore:
         with self._lock:
             if not self.root.exists():
                 return []
+            chosen = None
+            chosen_at = ""
+            chosen_folder = None
             for folder in self.root.iterdir():
                 path = folder / "session.json"
                 if not path.is_file():
@@ -659,17 +865,27 @@ class SessionStore:
                 except (OSError, json.JSONDecodeError):
                     continue
                 question = session.get("question") or {}
-                if question.get("id") != question_id:
+                if question.get("id") != question_id or not (session.get("turns") or []):
                     continue
-                for turn in session.get("turns") or []:
-                    feedback = turn.get("feedback") if isinstance(turn.get("feedback"), dict) else {}
-                    natural = str(feedback.get("natural") or "").strip()
-                    if turn.get("status") != "ready" or not natural:
-                        continue
-                    speech = turn.get("speech_file") or ""
-                    retell = turn.get("retell_file") or ""
-                    prompt = turn.get("prompt") or {}
-                    lines.append(
+                updated = str(session.get("updated_at") or session.get("created_at") or "")
+                if chosen is not None and updated <= chosen_at:
+                    continue
+                chosen = session
+                chosen_at = updated
+                chosen_folder = folder
+            if chosen is None:
+                return []
+            folder = chosen_folder
+            session = chosen
+            for turn in session.get("turns") or []:
+                feedback = turn.get("feedback") if isinstance(turn.get("feedback"), dict) else {}
+                natural = str(feedback.get("natural") or "").strip()
+                if turn.get("status") != "ready" or not natural:
+                    continue
+                speech = turn.get("speech_file") or ""
+                retell = turn.get("retell_file") or ""
+                prompt = turn.get("prompt") or {}
+                lines.append(
                         {
                             "session_id": session.get("id"),
                             "index": turn.get("index"),
@@ -682,6 +898,7 @@ class SessionStore:
                             "has_speech": bool(_SPEECH.match(speech) and (folder / speech).is_file()),
                             "has_retell": bool(_RETELL.match(retell) and (folder / retell).is_file()),
                             "chunks": _echo_chunks(feedback, folder),
+                            "cores": _echo_cores(feedback),
                             "sources": _echo_sources(feedback, turn, folder),
                         }
                     )

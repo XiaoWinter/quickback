@@ -6,8 +6,26 @@ from urllib.parse import urlparse
 
 import zhconv
 
-from app.gemini_client import ModelError, apply_review_policy, parse_feedback
-from app.prompts import build_feedback_prompt
+from app.gemini_client import (
+    ModelError,
+    apply_review_policy,
+    merge_variant_chunks,
+    merge_variant_cores,
+    missing_core_lines,
+    missing_variant_lines,
+    gloss_from_core_response,
+    note_from_core_response,
+    parse_feedback,
+    parse_progress_score,
+)
+from app.prompts import (
+    build_chunk_repair_prompt,
+    build_core_gloss_prompt,
+    build_core_note_prompt,
+    build_core_repair_prompt,
+    build_feedback_prompt,
+    build_progress_prompt,
+)
 
 _MAX_AUDIO_B64 = 10_000_000
 
@@ -152,7 +170,141 @@ class QwenClient:
             repaired = self._translate_leftover_chinese(parsed, transcript)
             if repaired and not contains_cjk(repaired.get("natural") or ""):
                 parsed = repaired
+        self._repair_variant_chunks(parsed)
+        self._repair_variant_cores(parsed)
         return apply_review_policy(parsed, transcript, previous_natural, previous_natural_zh)
+
+    def _repair_variant_chunks(self, parsed: dict) -> None:
+        missing = missing_variant_lines(parsed)
+        if not missing:
+            return
+        try:
+            payload = self._post(
+                chat_url(self.base_url),
+                {
+                    "model": self.feedback_model,
+                    "temperature": 0.2,
+                    "enable_thinking": False,
+                    "response_format": {"type": "json_object"},
+                    "messages": [{"role": "user", "content": build_chunk_repair_prompt(missing)}],
+                },
+            )
+        except ModelError:
+            return
+        choices = payload.get("choices") or []
+        text = ""
+        if choices:
+            text = str(((choices[0] or {}).get("message") or {}).get("content") or "").strip()
+        if not text:
+            return
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return
+        merge_variant_chunks(parsed, data)
+
+    def _repair_variant_cores(self, parsed: dict) -> None:
+        missing = missing_core_lines(parsed)
+        if not missing:
+            return
+        try:
+            payload = self._post(
+                chat_url(self.base_url),
+                {
+                    "model": self.feedback_model,
+                    "temperature": 0.2,
+                    "enable_thinking": False,
+                    "response_format": {"type": "json_object"},
+                    "messages": [{"role": "user", "content": build_core_repair_prompt(missing)}],
+                },
+            )
+        except ModelError:
+            return
+        choices = payload.get("choices") or []
+        text = ""
+        if choices:
+            text = str(((choices[0] or {}).get("message") or {}).get("content") or "").strip()
+        if not text:
+            return
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return
+        merge_variant_cores(parsed, data)
+
+    def core_gloss(self, en: str, line: str) -> tuple[str, str]:
+        payload = self._post(
+            chat_url(self.base_url),
+            {
+                "model": self.feedback_model,
+                "temperature": 0.2,
+                "enable_thinking": False,
+                "response_format": {"type": "json_object"},
+                "messages": [{"role": "user", "content": build_core_gloss_prompt(en, line)}],
+            },
+        )
+        choices = payload.get("choices") or []
+        text = ""
+        if choices:
+            text = str(((choices[0] or {}).get("message") or {}).get("content") or "").strip()
+        return gloss_from_core_response(text)
+
+    def core_note(self, en: str, usage: str, transcript: str) -> str:
+        payload = self._post(
+            chat_url(self.base_url),
+            {
+                "model": self.feedback_model,
+                "temperature": 0.2,
+                "enable_thinking": False,
+                "response_format": {"type": "json_object"},
+                "messages": [{"role": "user", "content": build_core_note_prompt(en=en, usage=usage, transcript=transcript)}],
+            },
+        )
+        choices = payload.get("choices") or []
+        text = ""
+        if choices:
+            text = str(((choices[0] or {}).get("message") or {}).get("content") or "").strip()
+        return note_from_core_response(text)
+
+    def progress_score(
+        self,
+        *,
+        topic_en: str,
+        topic_zh: str,
+        prompt_en: str,
+        prompt_zh: str,
+        transcript: str,
+        duration_ms: int | None,
+        earlier: list[tuple[str, str]],
+    ) -> dict:
+        payload = self._post(
+            chat_url(self.base_url),
+            {
+                "model": self.feedback_model,
+                "temperature": 0.2,
+                "enable_thinking": False,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": build_progress_prompt(
+                            topic_en=topic_en,
+                            topic_zh=topic_zh,
+                            prompt_en=prompt_en,
+                            prompt_zh=prompt_zh,
+                            transcript=transcript,
+                            duration_ms=duration_ms,
+                            earlier=earlier,
+                        ),
+                    }
+                ],
+            },
+        )
+        choices = payload.get("choices") or []
+        text = ""
+        if choices:
+            text = str(((choices[0] or {}).get("message") or {}).get("content") or "").strip()
+        return parse_progress_score(text, transcript)
 
     def _translate_leftover_chinese(self, parsed: dict, transcript: str) -> dict | None:
         payload = self._post(

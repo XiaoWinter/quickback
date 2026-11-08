@@ -27,7 +27,7 @@ class Settings:
     qwen_feedback_model = os.getenv("QWEN_FEEDBACK_MODEL", "qwen-flash").strip() or "qwen-flash"
     qwen_asr_model = os.getenv("QWEN_ASR_MODEL", "qwen3-asr-flash").strip() or "qwen3-asr-flash"
     qwen_tts_model = os.getenv("QWEN_TTS_MODEL", "qwen3-tts-flash").strip() or "qwen3-tts-flash"
-    qwen_tts_voice = os.getenv("QWEN_TTS_VOICE", "Cherry").strip() or "Cherry"
+    qwen_tts_voice = os.getenv("QWEN_TTS_VOICE", "Serena").strip() or "Serena"
     data_dir = _data_dir()
     host = os.getenv("QUICKBACK_HOST", "0.0.0.0").strip() or "0.0.0.0"
     port = int(os.getenv("QUICKBACK_PORT", "8765"))

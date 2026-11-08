@@ -12,7 +12,7 @@ from app.gemini_client import (
 )
 from app.practice import PracticeStore
 from app.providers import ProviderStore
-from app.prompts import build_feedback_prompt
+from app.prompts import build_core_note_prompt, build_feedback_prompt
 from app.qwen_client import audio_url_from_qwen, chat_url, contains_cjk, to_simplified, transcript_from_qwen, usable_audio_url
 from app.questions import (
     QuestionError,
@@ -25,6 +25,18 @@ from app.questions import (
 )
 from app.segments import split_transcript
 from app.storage import SessionStore, StorageError
+
+
+class CoreNotePromptTests(unittest.TestCase):
+    def test_note_must_report_a_real_grammar_error(self):
+        prompt = build_core_note_prompt(
+            en="rarely spoke",
+            usage="表示某人说话极少。",
+            transcript="The man, who rarely spoke, is my grandpa.",
+        )
+        self.assertIn("Grammar of the whole sentence", prompt)
+        self.assertIn("Do not say 使用正确", prompt)
+        self.assertIn("rarely speaks", prompt)
 
 
 class SegmentTests(unittest.TestCase):
@@ -129,6 +141,127 @@ class FeedbackTests(unittest.TestCase):
         native = next(item for item in data["variants"] if item["key"] == "native")
         self.assertEqual(simple["chunks"], [{"en": "I have", "role": "pivot"}])
         self.assertEqual(native["chunks"], [])
+
+    def test_empty_native_and_professional_chunks_can_be_filled(self):
+        from app.gemini_client import merge_variant_chunks, missing_variant_lines
+
+        feedback = {
+            "variants": [
+                {"key": "simple", "en": "I like cats.", "chunks": [{"en": "I like", "role": "flow"}]},
+                {"key": "professional", "en": "I prefer cats as they are soft.", "chunks": []},
+                {"key": "native", "en": "I love cats because they're soft.", "chunks": []},
+            ]
+        }
+        self.assertEqual(
+            [key for key, _en in missing_variant_lines(feedback)],
+            ["professional", "native"],
+        )
+        merge_variant_chunks(feedback, {
+            "professional": [
+                {"en": "I prefer", "role": "flow"},
+                {"en": "as they are", "role": "pivot"},
+                {"en": "not in the line", "role": "flow"},
+            ],
+            "native": {"chunks": [{"en": "I love", "role": "flow"}, {"en": "because they're", "role": "pivot"}]},
+        })
+        professional = feedback["variants"][1]["chunks"]
+        native = feedback["variants"][2]["chunks"]
+        self.assertEqual(professional, [{"en": "I prefer", "role": "flow"}, {"en": "as they are", "role": "pivot"}])
+        self.assertEqual(native, [{"en": "I love", "role": "flow"}, {"en": "because they're", "role": "pivot"}])
+        self.assertEqual(feedback["variants"][0]["chunks"], [{"en": "I like", "role": "flow"}])
+
+    def test_long_openings_are_cut_back_to_frames(self):
+        from app.gemini_client import merge_variant_chunks
+
+        feedback = {
+            "variants": [
+                {
+                    "key": "professional",
+                    "en": "My grandfather has been quiet but consistently kind, though I remain unsure.",
+                    "chunks": [],
+                },
+                {
+                    "key": "native",
+                    "en": "My grandpa really shaped me. So I was quiet. And honestly, that stuck. Honestly, I don't know.",
+                    "chunks": [],
+                },
+            ]
+        }
+        merge_variant_chunks(feedback, {
+            "professional": [
+                {"en": "My grandfather has been", "role": "flow"},
+                {"en": "His demeanor profoundly", "role": "flow"},
+            ],
+            "native": [
+                {"en": "My grandpa really shaped", "role": "flow"},
+                {"en": "I grew up in the", "role": "flow"},
+                {"en": "So I was around", "role": "flow"},
+            ],
+        })
+        self.assertEqual(feedback["variants"][0]["chunks"], [
+            {"en": "My grandfather has", "role": "flow"},
+            {"en": "but consistently", "role": "pivot"},
+            {"en": "though I", "role": "pivot"},
+        ])
+        native = feedback["variants"][1]["chunks"]
+        self.assertIn({"en": "And honestly", "role": "refactor"}, native)
+        self.assertIn({"en": "Honestly, I", "role": "refactor"}, native)
+        self.assertNotIn({"en": "I grew up in the", "role": "flow"}, native)
+
+    def test_cores_must_be_in_that_line_and_not_a_frame(self):
+        from app.gemini_client import core_was_used, merge_variant_cores
+
+        raw = """
+        {
+          "natural": "I like cats.",
+          "variants": {
+            "simple": {"en": "I like cats.", "zh": "我喜欢猫。", "chunks": [{"en": "I like", "role": "flow"}]},
+            "native": {
+              "en": "I was pretty much stuck at home, and it rubbed off on me.",
+              "zh": "我差不多困在家里，这也影响到了我。",
+              "chunks": [{"en": "I was", "role": "flow"}],
+              "cores": [
+                {"en": "pretty much stuck", "usage": "pretty much 是差不多，stuck 这里是困在某处，不是粘住。", "cue": "用这个说法说：你整个暑假差不多都待在家里。"},
+                {"en": "rubbed off on me", "usage": "表示别人的习惯影响到了自己，不是擦到身上。", "cue": "用这个说法说：你室友晚睡，你也跟着晚睡了。"},
+                {"en": "I was", "usage": "这是起句，不该留下。", "cue": "再说一句。"},
+                {"en": "not in the line", "usage": "不在这句里。", "cue": "再说一句。"},
+                {"en": "pretty much", "usage": "只有英文说明", "cue": "no chinese"}
+              ]
+            }
+          }
+        }
+        """
+        data = parse_feedback(raw)
+        native = next(item for item in data["variants"] if item["key"] == "native")
+        self.assertEqual([item["en"] for item in native["cores"]], ["pretty much stuck", "rubbed off on me"])
+        self.assertTrue(core_was_used("pretty much stuck", "I was pretty much stuck at home."))
+        self.assertFalse(core_was_used("pretty much stuck", "I stayed at home."))
+        feedback = {
+            "variants": [
+                {"key": "simple", "en": "I like cats.", "chunks": [{"en": "I like", "role": "flow"}], "cores": []},
+                {"key": "native", "en": "I was pretty much stuck at home.", "chunks": [], "cores": []},
+            ]
+        }
+        merge_variant_cores(feedback, {
+            "native": {"cores": [{"en": "pretty much stuck", "usage": "差不多困在某处。", "cue": "说你暑假待在家里。"}]},
+            "simple": [{"en": "I like", "usage": "表达喜欢。", "cue": "说你喜欢茶。"}],
+        })
+        self.assertEqual(feedback["variants"][0]["cores"], [])
+        self.assertEqual(feedback["variants"][1]["cores"][0]["en"], "pretty much stuck")
+
+    def test_gloss_keeps_chinese_usage_and_cue(self):
+        from app.gemini_client import gloss_from_core_response
+
+        usage, cue = gloss_from_core_response(
+            '{"usage": "表示故意这么做，不是碰巧。", "cue": "说你是故意晚到的。"}'
+        )
+        self.assertEqual(usage, "表示故意这么做，不是碰巧。")
+        self.assertEqual(cue, "说你是故意晚到的。")
+        self.assertEqual(gloss_from_core_response('{"usage": "on purpose", "cue": "say you meant it"}'), ("", ""))
+        long_usage = ("这" * 40 + "。") * 5
+        clipped, _cue = gloss_from_core_response(json.dumps({"usage": long_usage, "cue": "说你是故意的。"}))
+        self.assertLessEqual(len(clipped), 180)
+        self.assertTrue(clipped.endswith("。"))
 
     def test_transcript_comes_from_audio_transcription(self):
         class Transcription:
@@ -435,6 +568,14 @@ class RetellTests(unittest.TestCase):
                             "en": "I like noodles.",
                             "zh": "我喜欢面条。",
                             "chunks": [{"en": "I like", "role": "flow"}],
+                            "cores": [
+                                {
+                                    "en": "pretty much stuck",
+                                    "usage": "差不多。",
+                                    "cue": "说你困在家里。",
+                                    "attempt": {"transcript": "I was pretty much stuck.", "note": "用上了。"},
+                                }
+                            ],
                         }
                     ],
                 },
@@ -462,7 +603,18 @@ class RetellTests(unittest.TestCase):
             self.assertEqual(lines[0]["sources"]["main"]["en"], "I like noodles.")
             self.assertEqual(lines[0]["sources"]["simple"]["en"], "I like noodles.")
             self.assertFalse(lines[0]["sources"]["main"]["has_speech"])
+            self.assertEqual(lines[0]["cores"], [
+                {
+                    "en": "pretty much stuck",
+                    "usage": "差不多。",
+                    "cue": "说你困在家里。",
+                    "scope": "simple",
+                    "number": 0,
+                    "attempts": [{"slot": 0, "transcript": "I was pretty much stuck.", "note": "用上了。"}],
+                }
+            ])
             self.assertEqual(lines[1]["chunks"], [])
+            self.assertEqual(lines[1]["cores"], [])
             replaced = store.update_turn(
                 session["id"],
                 index,
@@ -470,6 +622,34 @@ class RetellTests(unittest.TestCase):
             )
             self.assertNotIn("retell_file", replaced["turns"][0])
             self.assertFalse(path.exists())
+
+    def test_echoes_ignore_an_older_practice_of_the_same_question(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp))
+            question = {"id": "city-food", "en": "What food?", "zh": "吃什么？"}
+            older = store.create(question)
+            older, index = store.append_audio(older["id"], b"RIFFold", "audio/wav", 1000)
+            store.update_turn(
+                older["id"],
+                index,
+                status="ready",
+                feedback={"natural": "I like noodles.", "chunks": [{"en": "I like", "role": "flow"}]},
+            )
+            path = Path(tmp) / older["id"] / "session.json"
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            saved["updated_at"] = "2020-01-01T00:00:00+00:00"
+            path.write_text(json.dumps(saved), encoding="utf-8")
+            newer = store.create(question)
+            newer, index = store.append_audio(newer["id"], b"RIFFnew", "audio/wav", 1000)
+            store.update_turn(
+                newer["id"],
+                index,
+                status="ready",
+                feedback={"natural": "I like rice.", "chunks": [{"en": "I like", "role": "flow"}]},
+            )
+            lines = store.echoes_for_question("city-food")
+            self.assertEqual([item["natural"] for item in lines], ["I like rice."])
+            self.assertEqual(lines[0]["session_id"], newer["id"])
 
     def test_drop_retell_removes_only_the_shadow_take(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -530,6 +710,80 @@ class RetellTests(unittest.TestCase):
             )
             self.assertEqual(replaced["turns"][0]["feedback"]["variants"], [])
             self.assertFalse(speech_path.exists())
+
+    def test_core_attempt_stays_on_that_phrase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp))
+            session = store.create({"id": "city-food", "en": "What food?", "zh": "吃什么？"})
+            session, index = store.append_audio(session["id"], b"RIFFanswer", "audio/wav", 1000)
+            store.update_turn(
+                session["id"],
+                index,
+                status="ready",
+                feedback={
+                    "natural": "I like noodles.",
+                    "variants": [
+                        {
+                            "key": "native",
+                            "en": "I'm pretty much stuck on noodles.",
+                            "cores": [{"en": "pretty much stuck", "usage": "差不多离不开。", "cue": "说你离不开茶。"}],
+                        }
+                    ],
+                },
+            )
+            spoken = store.save_variant_speech(session["id"], index, "native", b"RIFFnative", "I'm pretty much stuck on noodles.")
+            saved = store.save_core_attempt(
+                session["id"],
+                index,
+                "native",
+                0,
+                0,
+                "I am pretty much stuck on tea.",
+                "用上了。",
+            )
+            saved = store.save_core_attempt(
+                session["id"],
+                index,
+                "native",
+                0,
+                2,
+                "She was pretty much stuck at home.",
+                "用上了。",
+            )
+            core = saved["turns"][0]["feedback"]["variants"][0]["cores"][0]
+            self.assertEqual(core["attempts"][0]["transcript"], "I am pretty much stuck on tea.")
+            self.assertEqual(core["attempts"][2]["transcript"], "She was pretty much stuck at home.")
+            self.assertNotIn("attempt", core)
+            speech_path, _mime = store.variant_speech_path(session["id"], index, "native")
+            self.assertTrue(speech_path.is_file())
+            self.assertEqual(spoken["turns"][0]["feedback"]["variants"][0]["speech_file"], "turn-01-speech-native.wav")
+
+    def test_cores_can_be_added_and_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SessionStore(Path(tmp))
+            session = store.create({"id": "city-food", "en": "What food?", "zh": "吃什么？"})
+            session, index = store.append_audio(session["id"], b"RIFFanswer", "audio/wav", 1000)
+            store.update_turn(
+                session["id"],
+                index,
+                status="ready",
+                feedback={
+                    "natural": "I like noodles.",
+                    "variants": [{"key": "native", "en": "I'm pretty much stuck on noodles.", "cores": []}],
+                },
+            )
+            store.save_variant_speech(session["id"], index, "native", b"RIFFnative", "I'm pretty much stuck on noodles.")
+            saved = store.add_core(session["id"], index, "native", "pretty much stuck", "差不多困住。", "说你困在家里。")
+            saved = store.add_core(session["id"], index, "native", "on purpose", "故意这么做。", "")
+            cores = saved["turns"][0]["feedback"]["variants"][0]["cores"]
+            self.assertEqual([item["en"] for item in cores], ["pretty much stuck", "on purpose"])
+            with self.assertRaises(StorageError):
+                store.add_core(session["id"], index, "native", "On purpose", "重复了。", "")
+            removed = store.delete_core(session["id"], index, "native", 0)
+            left = removed["turns"][0]["feedback"]["variants"][0]["cores"]
+            self.assertEqual([item["en"] for item in left], ["on purpose"])
+            speech_path, _mime = store.variant_speech_path(session["id"], index, "native")
+            self.assertTrue(speech_path.is_file())
 
     def test_chunk_retell_stays_on_that_piece(self):
         with tempfile.TemporaryDirectory() as tmp:

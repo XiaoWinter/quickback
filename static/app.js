@@ -18,6 +18,11 @@ const state = {
   retake: null,
   retell: null,
   retellNote: null,
+  drill: null,
+  coreNote: null,
+  addingCore: null,
+  coreDraft: null,
+  fillingCore: false,
 };
 
 let questionToken = 0;
@@ -98,6 +103,23 @@ function retellButton(turn, label, role, level, chunk) {
   return button;
 }
 
+function coreActive(index, level, number, slot) {
+  const current = state.drill;
+  return Boolean(current)
+    && state.recording
+    && current.index === Number(index)
+    && (current.level || "") === (level || "")
+    && String(current.number) === String(number)
+    && String(current.slot) === String(slot);
+}
+
+function coreAttempts(core) {
+  if (Array.isArray(core.attempts)) return core.attempts;
+  const old = core.attempt;
+  if (old && String(old.transcript || "").trim()) return [old];
+  return [];
+}
+
 function retellActive(index, level, chunk, sessionId) {
   const current = state.retell;
   const wanted = chunk == null || chunk === "" ? "" : String(chunk);
@@ -171,6 +193,7 @@ function promptField(label, name, value, maxLength) {
   input.value = value || "";
   input.required = true;
   input.maxLength = maxLength || 240;
+  input.autocomplete = "off";
   input.addEventListener("input", () => {
     if (state.editDraft) state.editDraft[name] = input.value;
   });
@@ -631,9 +654,35 @@ function renderEcho(parent, turn, level) {
     addLine(echo, "error-line", note.message);
   }
   renderChunkEcho(echo, turn, level);
+  if (level) renderCores(echo, turn, level);
 }
 
 const CHUNK_ROLES = { flow: "起句", pivot: "转折", refactor: "改口" };
+const CHUNK_SLOT = "[ _____ ]";
+const CHUNK_FUNCTION = new Set("i you he she it we they me him us them my your his her our their a an the this that these those am is are was were be been being do does did have has had will would can could shall should may might must so but and or nor because though although if when while as of to in on at for with from about into over by not just really honestly actually consistently very too also".split(" "));
+const CHUNK_VERBS = new Set("like love want need spend spent stay stayed shape shaped help helped make made get got take took go went come came see saw know knew think thought feel felt say said leave left keep kept seem call work talk live grow grew tell told give gave find found become became let".split(" "));
+
+function chunkNeedsSlot(phrase) {
+  const words = String(phrase || "").match(/[A-Za-z]+(?:['’][A-Za-z]+)?/g) || [];
+  if (words.length < 2) return false;
+  const verbAt = words.findIndex((word) => {
+    const token = word.toLowerCase();
+    if (CHUNK_VERBS.has(token)) return true;
+    if (CHUNK_FUNCTION.has(token)) return "am is are was were be been being do does did have has had will would can could shall should may might must".split(" ").includes(token);
+    return token.length > 4 && /(?:ed|ing)$/.test(token);
+  });
+  if (verbAt < 0) return true;
+  return !words.slice(verbAt + 1).some((word) => !CHUNK_FUNCTION.has(word.toLowerCase()));
+}
+
+function appendChunkSlot(node, phrase) {
+  const slot = document.createElement("span");
+  slot.className = "chunk-slot";
+  slot.textContent = CHUNK_SLOT;
+  node.append(document.createTextNode(`${phrase} `), slot);
+}
+window.QuickbackChunkSlot = appendChunkSlot;
+window.QuickbackChunkNeedsSlot = chunkNeedsSlot;
 
 function chunkList(turn, level) {
   const raw = level
@@ -642,7 +691,7 @@ function chunkList(turn, level) {
   return raw.filter((item) => CHUNK_ROLES[item.role] && (item.en || "").trim());
 }
 
-function renderFramedLine(parent, text, chunks) {
+function renderFramedLine(parent, text, chunks, cores) {
   const p = document.createElement("p");
   p.className = "natural";
   const source = text || "";
@@ -651,7 +700,7 @@ function renderFramedLine(parent, text, chunks) {
   chunkList({ feedback: { chunks } }, "").forEach((chunk) => {
     const en = chunk.en.replace(/\.\.\./g, "").trim();
     const at = lower.indexOf(en.toLowerCase());
-    if (at >= 0) ranges.push({ start: at, end: at + en.length });
+    if (at >= 0) ranges.push({ start: at, end: at + en.length, core: false });
   });
   ranges.sort((a, b) => a.start - b.start || b.end - a.end);
   const marks = [];
@@ -661,11 +710,21 @@ function renderFramedLine(parent, text, chunks) {
     marks.push(range);
     cursor = range.end;
   });
+  (cores || []).forEach((core) => {
+    const en = (core.en || "").trim();
+    const at = en ? lower.indexOf(en.toLowerCase()) : -1;
+    if (at < 0) return;
+    const range = { start: at, end: at + en.length, core: true };
+    if (marks.some((item) => range.start < item.end && item.start < range.end)) return;
+    marks.push(range);
+  });
+  marks.sort((a, b) => a.start - b.start || b.end - a.end);
   let pos = 0;
   marks.forEach((range) => {
+    if (range.start < pos) return;
     if (range.start > pos) p.appendChild(document.createTextNode(source.slice(pos, range.start)));
     const mark = document.createElement("mark");
-    mark.className = "chunk-mark";
+    mark.className = range.core ? "core-mark" : "chunk-mark";
     mark.textContent = source.slice(range.start, range.end);
     p.appendChild(mark);
     pos = range.end;
@@ -739,20 +798,23 @@ const slicePlayer = {
 slicePlayer.ratios = sliceRatios;
 window.QuickbackSlice = slicePlayer;
 
-function chunkSpeakButton(turn, level, text) {
+function chunkSpeakButton(turn, level, text, slot) {
   const full = speechLine(turn, level);
   const ratios = sliceRatios(full, text);
+  const label = slot ? `${text} ${CHUNK_SLOT}` : text;
   if (!speechReady(turn, level) || !ratios) {
     const line = document.createElement("p");
     line.className = "natural";
-    line.textContent = text;
+    if (slot) appendChunkSlot(line, text);
+    else line.textContent = text;
     return line;
   }
   const button = document.createElement("button");
   button.type = "button";
   button.className = "chunk-speak";
-  button.textContent = text;
-  button.setAttribute("aria-label", `播放 ${text}`);
+  if (slot) appendChunkSlot(button, text);
+  else button.textContent = text;
+  button.setAttribute("aria-label", `播放 ${label}`);
   button.addEventListener("click", () => {
     slicePlayer.play(button, mediaSrc("speech", turn, level), ratios);
   });
@@ -771,7 +833,7 @@ function renderChunkEcho(parent, turn, level) {
   const block = document.createElement("div");
   block.className = "chunk-echo";
   parent.appendChild(block);
-  addLabel(block, "功能性句组跟读", level ? 3 : 2);
+  addLabel(block, "功能性句组跟读", level ? 3 : 2).classList.add("is-highlight");
   chunks.forEach((chunk, number) => {
     const part = document.createElement("div");
     part.className = "chunk";
@@ -783,7 +845,9 @@ function renderChunkEcho(parent, turn, level) {
     const role = document.createElement("span");
     role.className = `chunk-role is-${chunk.role}`;
     role.textContent = CHUNK_ROLES[chunk.role];
-    line.append(role, chunkSpeakButton(turn, level, chunk.en.trim()));
+    const phrase = chunk.en.trim();
+    const slot = chunkNeedsSlot(phrase);
+    line.append(role, chunkSpeakButton(turn, level, phrase, slot));
     head.appendChild(line);
     const file = chunk.retell_file || "";
     const actions = document.createElement("div");
@@ -792,7 +856,7 @@ function renderChunkEcho(parent, turn, level) {
       const heard = document.createElement("button");
       heard.type = "button";
       heard.className = "chunk-heard";
-      heard.setAttribute("aria-label", `播放跟读 ${chunk.en.trim()}`);
+      heard.setAttribute("aria-label", `播放跟读 ${phrase}${slot ? ` ${CHUNK_SLOT}` : ""}`);
       heard.addEventListener("click", () => chunkRetell.play(heard, chunkMedia(turn, level, number)));
       actions.appendChild(heard);
     }
@@ -820,8 +884,128 @@ function renderChunkEcho(parent, turn, level) {
   });
 }
 
+function coreEntries(turn, level) {
+  const item = ((turn.feedback || {}).variants || []).find((entry) => entry.key === level);
+  return ((item && item.cores) || [])
+    .map((core, number) => ({ core, number }))
+    .filter(({ core }) => core && String(core.en || "").trim());
+}
+
+function coreKey(index, level) {
+  return `${index}:${level}`;
+}
+
+function coreField(label, name, value, maxLength, required) {
+  const wrap = document.createElement("label");
+  wrap.textContent = label;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.name = name;
+  input.value = value || "";
+  input.required = required;
+  input.maxLength = maxLength;
+  input.autocomplete = "off";
+  input.addEventListener("input", () => {
+    if (state.coreDraft) state.coreDraft[name] = input.value;
+  });
+  wrap.appendChild(input);
+  return wrap;
+}
+
+function coreEditor(index, level) {
+  const draft = state.coreDraft || { en: "" };
+  const box = document.createElement("div");
+  box.className = "prompt-edit";
+  box.append(coreField("语块", "en", draft.en, 80, true));
+  const actions = document.createElement("div");
+  actions.className = "question-actions";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "primary";
+  save.dataset.coreSave = String(index);
+  save.dataset.coreLevel = level;
+  save.textContent = "添加";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "text-btn";
+  cancel.dataset.coreCancel = String(index);
+  cancel.dataset.coreLevel = level;
+  cancel.textContent = "取消";
+  actions.append(save, cancel);
+  box.appendChild(actions);
+  return box;
+}
+
+function renderCores(parent, turn, level) {
+  const cores = coreEntries(turn, level);
+  const block = document.createElement("div");
+  block.className = "core-block";
+  parent.appendChild(block);
+  addLabel(block, "核心语块内化", 3).classList.add("is-highlight");
+  cores.forEach(({ core, number }) => {
+    const part = document.createElement("div");
+    part.className = "core";
+    const head = document.createElement("div");
+    head.className = "echo-head";
+    part.appendChild(head);
+    head.appendChild(chunkSpeakButton(turn, level, core.en.trim()));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "text-btn";
+    remove.dataset.coreDelete = String(turn.index);
+    remove.dataset.coreLevel = level;
+    remove.dataset.coreNumber = String(number);
+    remove.textContent = "删除";
+    head.appendChild(remove);
+    if ((core.usage || "").trim()) addLine(part, "note", `用法：${core.usage.trim()}`);
+    if ((core.cue || "").trim()) addLine(part, "note", `照这个情境造三句：${core.cue.trim()}`);
+    const attempts = coreAttempts(core);
+    for (let slot = 0; slot < 3; slot += 1) {
+      const attempt = attempts[slot] || {};
+      const filled = Boolean(String(attempt.transcript || "").trim());
+      const row = document.createElement("div");
+      row.className = "core-try";
+      const rowHead = document.createElement("div");
+      rowHead.className = "echo-head";
+      row.appendChild(rowHead);
+      const which = document.createElement("span");
+      which.className = "core-try-label";
+      which.textContent = `第 ${slot + 1} 句`;
+      const say = document.createElement("button");
+      say.type = "button";
+      say.className = "text-btn";
+      say.dataset.coreSay = String(turn.index);
+      say.dataset.coreLevel = level;
+      say.dataset.coreNumber = String(number);
+      say.dataset.coreSlot = String(slot);
+      if (filled) say.dataset.coreRole = "redo";
+      say.textContent = filled ? "重说" : "说一句";
+      rowHead.append(which, say);
+      if (filled) addLine(row, "spoken", `你说：${attempt.transcript.trim()}`);
+      if ((attempt.note || "").trim()) addLine(row, "note", attempt.note.trim());
+      const note = state.coreNote;
+      if (note && note.index === turn.index && note.level === level && String(note.number) === String(number) && String(note.slot) === String(slot)) {
+        addLine(row, "error-line", note.message);
+      }
+      part.appendChild(row);
+    }
+    block.appendChild(part);
+  });
+  if (state.addingCore === coreKey(turn.index, level)) {
+    block.appendChild(coreEditor(turn.index, level));
+    return;
+  }
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "text-btn core-add";
+  add.dataset.coreAdd = String(turn.index);
+  add.dataset.coreLevel = level;
+  add.textContent = "添加语块";
+  block.appendChild(add);
+}
+
 function renderVariants(turn) {
-  const order = [["simple", "简单"], ["native", "地道"], ["professional", "专业"]];
+  const order = [["native", "地道"], ["simple", "简单"], ["professional", "专业"]];
   const byKey = new Map(((turn.feedback || {}).variants || []).map((item) => [item.key, item]));
   const box = document.createElement("div");
   box.className = "framed";
@@ -834,7 +1018,7 @@ function renderVariants(turn) {
     const part = document.createElement("div");
     part.className = "variant";
     addLabel(part, label, 2);
-    renderFramedLine(part, en, item.chunks || []);
+    renderFramedLine(part, en, item.chunks || [], item.cores || []);
     if ((item.zh || "").trim()) addMeaning(part, item.zh.trim());
     renderSpeech(part, turn, { level: key, text: en, file: item.speech_file || "" });
     renderEcho(part, turn, key);
@@ -902,10 +1086,9 @@ function renderPractice() {
   } else {
     nextEl.hidden = false;
     const last = turns[turns.length - 1];
-    const pending = session.pending_prompt || last.prompt;
-    const isNew = pending.en && pending.en !== last.prompt.en;
-    if (isNew) renderPrompt(nextEl, "追问", pending, "follow");
-    else if (last.status === "error") renderPrompt(nextEl, "再答一次", pending);
+    const follow = followUpPrompt(session);
+    if (follow) renderPrompt(nextEl, "追问", follow, "follow");
+    else if (last.status === "error") renderPrompt(nextEl, "再答一次", session.pending_prompt || last.prompt);
     else renderEmptyFollow();
   }
   parkRecorder();
@@ -970,9 +1153,12 @@ function syncControls() {
   finishBtn.hidden = reviewing || state.retake != null || closed || !((state.session && state.session.turns) || []).length;
   recHint.hidden = closed && state.retake == null;
   reviewEl.hidden = !reviewing;
-  recordBtn.disabled = state.busy || Boolean(state.editingPrompt) || state.editingTurn != null || state.retell != null;
+  recordBtn.disabled = state.busy || Boolean(state.editingPrompt) || state.editingTurn != null || state.retell != null || state.drill != null || (window.QuickbackProgress && window.QuickbackProgress.busy());
   cancelRetakeBtn.hidden = state.retake == null || state.recording || state.busy;
-  document.querySelectorAll("[data-prompt-edit], [data-prompt-delete], [data-prompt-save], [data-turn-edit], [data-turn-delete], [data-turn-save], [data-turn-retake]").forEach((button) => {
+  document.querySelectorAll("[data-prompt-edit], [data-prompt-delete], [data-prompt-save]").forEach((button) => {
+    button.disabled = state.busy || state.recording;
+  });
+  document.querySelectorAll("[data-turn-edit], [data-turn-delete], [data-turn-save], [data-turn-retake]").forEach((button) => {
     button.disabled = state.busy || state.recording || Boolean(state.pending);
   });
   document.querySelectorAll("[data-retell]").forEach((button) => {
@@ -984,13 +1170,23 @@ function syncControls() {
   document.querySelectorAll("[data-retell-delete]").forEach((button) => {
     button.disabled = state.busy || state.recording || Boolean(state.pending);
   });
+  document.querySelectorAll("[data-core-add], [data-core-delete], [data-core-save], [data-core-cancel]").forEach((button) => {
+    button.disabled = state.busy || state.recording;
+    if ("coreSave" in button.dataset) button.textContent = state.fillingCore ? "正在补用法…" : "添加";
+  });
+  document.querySelectorAll("[data-core-say]").forEach((button) => {
+    const active = coreActive(button.dataset.coreSay, button.dataset.coreLevel || "", button.dataset.coreNumber || "", button.dataset.coreSlot || "");
+    button.disabled = state.busy || Boolean(state.pending) || (state.recording && !active);
+    const idle = button.dataset.coreRole === "redo" ? "重说" : "说一句";
+    button.textContent = active ? `说完了 ${formatClock(Date.now() - state.startedAt)}` : idle;
+  });
   sendTakeBtn.disabled = state.busy;
   redoTakeBtn.disabled = state.busy;
   newBtn.disabled = state.busy || state.recording || Boolean(state.pending);
   finishBtn.disabled = state.busy || state.recording || Boolean(state.pending);
   if (providerSelect) providerSelect.disabled = state.busy || state.recording;
   recordBtn.classList.toggle("is-recording", state.recording);
-  if (state.busy) {
+  if (state.busy && !state.fillingCore) {
     recordBtn.textContent = "正在转写，并生成反馈…";
     return;
   }
@@ -1001,7 +1197,7 @@ function syncControls() {
   takeHint.textContent = state.retake != null
     ? `听一遍。送出后会替换第 ${state.retake} 段，修正版也会重写。`
     : "这段还在本机。听一遍，满意再送出。";
-  if (state.recording) {
+  if (state.recording && !state.retell && !state.drill) {
     recordBtn.textContent = `说完了 ${formatClock(Date.now() - state.startedAt)}`;
     return;
   }
@@ -1026,11 +1222,17 @@ async function finishPractice() {
 }
 
 function activate(tab) {
+  if (tab !== "progress" && window.QuickbackProgress) window.QuickbackProgress.leave();
   practiceEl.hidden = tab !== "practice";
   historyEl.hidden = tab !== "history";
   questionsEl.hidden = tab !== "questions";
-  ["practice", "history", "questions"].forEach((name) => {
-    document.getElementById(`tab-${name}`).classList.toggle("is-active", name === tab);
+  const progressEl = document.getElementById("progress");
+  if (progressEl) progressEl.hidden = tab !== "progress";
+  const statsEl = document.getElementById("progress-stats");
+  if (statsEl) statsEl.hidden = tab !== "progress-stats";
+  ["practice", "history", "questions", "progress"].forEach((name) => {
+    const tabButton = document.getElementById(`tab-${name}`);
+    if (tabButton) tabButton.classList.toggle("is-active", name === tab);
   });
 }
 
@@ -1170,20 +1372,27 @@ function recordingBlock() {
   return "";
 }
 
-async function startRecording(retellIndex, retellLevel, retellChunk, sessionId) {
-  const echoing = Number.isInteger(retellIndex);
+async function startRecording(retellIndex, retellLevel, retellChunk, sessionId, drill) {
+  if (window.QuickbackProgress && window.QuickbackProgress.busy()) {
+    showBanner("先说完进展里的这一段。");
+    return;
+  }
+  const echoing = Number.isInteger(retellIndex) && !drill;
   const level = retellLevel || "";
   const chunk = retellChunk == null || retellChunk === "" ? "" : String(retellChunk);
   const targetSession = sessionId || (state.session && state.session.id) || "";
   const fail = (message) => {
-    if (echoing) {
+    if (drill) {
+      state.coreNote = { index: drill.index, level: drill.level, number: String(drill.number), slot: String(drill.slot), message };
+      renderPractice();
+    } else if (echoing) {
       state.retellNote = { index: retellIndex, level, chunk, message };
       renderPractice();
     }
     showBanner(message);
   };
   if (state.busy || state.recording || state.pending || state.editingPrompt || state.editingTurn != null) {
-    if (!echoing) return;
+    if (!echoing && !drill) return;
     if (state.pending) fail("上一段录音还没送出。先点上面的「就用这段」或「重说」。");
     else if (state.recording) fail("先说完正在录的这一段。");
     return;
@@ -1208,6 +1417,7 @@ async function startRecording(retellIndex, retellLevel, retellChunk, sessionId) 
     return;
   }
   state.retellNote = null;
+  state.coreNote = null;
   const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
   state.mimeType = candidates.find((item) => MediaRecorder.isTypeSupported(item)) || "";
   state.chunks = [];
@@ -1217,21 +1427,29 @@ async function startRecording(retellIndex, retellLevel, retellChunk, sessionId) 
   state.recorder.ondataavailable = (event) => {
     if (event.data.size) state.chunks.push(event.data);
   };
+  state.drill = drill || null;
   state.retell = echoing ? { index: retellIndex, level, chunk, sessionId: targetSession } : null;
   state.recorder.onstop = () => {
     const durationMs = Date.now() - state.startedAt;
     const echo = state.retell;
+    const practice = state.drill;
     const blob = new Blob(state.chunks, { type: state.recorder.mimeType || state.mimeType || "audio/webm" });
     stopStream();
     state.recording = false;
     state.retell = null;
+    state.drill = null;
     stopTimer();
     syncControls();
     if (durationMs < 400 || blob.size < 400) {
       const message = "录音太短了，再说长一点。";
-      if (echo != null) state.retellNote = { index: echo.index, level: echo.level || "", chunk: echo.chunk || "", message };
+      if (practice) state.coreNote = { index: practice.index, level: practice.level, number: String(practice.number), slot: String(practice.slot), message };
+      else if (echo != null) state.retellNote = { index: echo.index, level: echo.level || "", chunk: echo.chunk || "", message };
       showBanner(message);
       renderPractice();
+      return;
+    }
+    if (practice) {
+      uploadDrill(practice.index, practice.level, practice.number, practice.slot, blob);
       return;
     }
     if (echo != null) {
@@ -1249,6 +1467,72 @@ async function startRecording(retellIndex, retellLevel, retellChunk, sessionId) 
     syncControls();
     if (Date.now() - state.startedAt >= MAX_MS) stopRecording();
   }, 250);
+}
+
+async function saveCore(index, level) {
+  if (!state.session || state.busy || state.recording) return;
+  const draft = state.coreDraft || { en: "" };
+  state.busy = true;
+  state.fillingCore = true;
+  syncControls();
+  try {
+    state.session = await api(`/api/sessions/${state.session.id}/turns/${index}/cores/${level}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ en: draft.en || "" }),
+    });
+    state.addingCore = null;
+    state.coreDraft = null;
+    showBanner("");
+    renderPractice();
+  } catch (error) {
+    showBanner(error.message);
+  } finally {
+    state.busy = false;
+    state.fillingCore = false;
+    syncControls();
+  }
+}
+
+async function removeCore(index, level, number) {
+  if (!state.session || state.busy || state.recording) return;
+  if (!await askConfirm("删掉这个语块？造过的句子也会一起删掉。")) return;
+  state.busy = true;
+  syncControls();
+  try {
+    state.session = await api(`/api/sessions/${state.session.id}/turns/${index}/cores/${level}/${number}`, { method: "DELETE" });
+    state.addingCore = null;
+    showBanner("");
+    renderPractice();
+  } catch (error) {
+    showBanner(error.message);
+  } finally {
+    state.busy = false;
+    syncControls();
+  }
+}
+
+async function uploadDrill(index, level, number, slot, blob) {
+  const id = state.session && state.session.id;
+  if (!id) return;
+  const form = new FormData();
+  form.append("audio", blob, "core.webm");
+  form.append("mime_type", blob.type || "audio/webm");
+  state.busy = true;
+  state.coreNote = null;
+  syncControls();
+  try {
+    state.session = await api(`/api/sessions/${id}/turns/${index}/cores/${level}/${number}/${slot}`, { method: "POST", body: form });
+    showBanner("");
+    renderPractice();
+  } catch (error) {
+    state.coreNote = { index, level, number: String(number), slot: String(slot), message: error.message };
+    showBanner(error.message);
+    renderPractice();
+  } finally {
+    state.busy = false;
+    syncControls();
+  }
 }
 
 async function uploadRetell(index, level, chunk, blob, sessionId) {
@@ -1331,6 +1615,10 @@ function askConfirm(message) {
 }
 
 window.quickbackConfirm = askConfirm;
+window.QuickbackPracticeBusy = function () {
+  return state.busy || state.recording || Boolean(state.pending) || state.retell != null || state.drill != null;
+};
+window.QuickbackSync = syncControls;
 
 function promptBody(card) {
   return {
@@ -1368,7 +1656,8 @@ practiceEl.addEventListener("click", async (event) => {
   const turnDelete = event.target.closest("[data-turn-delete]");
   const turnRetake = event.target.closest("[data-turn-retake]");
   if (!edit && !save && !cancel && !remove && !turnEdit && !turnSave && !turnCancel && !turnDelete && !turnRetake) return;
-  if (state.recording || state.busy || state.pending) return;
+  if (state.recording || state.busy) return;
+  if (state.pending && !edit && !save && !cancel && !remove) return;
   if (turnRetake) {
     beginRetake(Number(turnRetake.dataset.turnRetake));
     return;
@@ -1496,10 +1785,20 @@ async function deleteTurn(index) {
   state.retake = null;
   showBanner("");
   renderPractice();
+  if (window.QuickbackQuestions && window.QuickbackQuestions.refresh) await window.QuickbackQuestions.refresh();
+}
+
+function followUpPrompt(session) {
+  const turns = (session && session.turns) || [];
+  const last = turns[turns.length - 1];
+  const feedback = last && last.feedback;
+  const en = feedback && String(feedback.follow_up || "").trim();
+  if (!last || last.status !== "ready" || !en) return null;
+  return { en, zh: String(feedback.follow_up_zh || "").trim() };
 }
 
 function currentPrompt(kind) {
-  if (kind === "follow") return (state.session && state.session.pending_prompt) || { en: "", zh: "" };
+  if (kind === "follow") return followUpPrompt(state.session) || { en: "", zh: "" };
   if (state.session) return state.session.question;
   return state.question || { en: "", zh: "" };
 }
@@ -1520,6 +1819,7 @@ async function savePrompt(kind, card) {
 }
 
 async function dropQuestion(id) {
+  if (window.QuickbackProgress && window.QuickbackProgress.questionId() === id) window.QuickbackProgress.clear();
   const current = state.session ? state.session.question.id : state.question && state.question.id;
   if (current !== id) return;
   if (state.session) forgetSessionSpeech(state.session.id);
@@ -1603,10 +1903,30 @@ async function answerQuestion(id) {
   renderPractice();
 }
 
+async function openProgressStats(questionId) {
+  activate("progress-stats");
+  window.scrollTo(0, 0);
+  try {
+    await window.QuickbackProgress.showStats(api, showBanner, questionId || "", showQuestions);
+  } catch (error) {
+    showBanner(error.message);
+  }
+}
+
+async function openProgress(questionId) {
+  activate("progress");
+  window.scrollTo(0, 0);
+  try {
+    await window.QuickbackProgress.show(api, showBanner, questionId || "", openProgressStats);
+  } catch (error) {
+    showBanner(error.message);
+  }
+}
+
 async function showQuestions() {
   activate("questions");
   try {
-    await window.QuickbackQuestions.show(api, showBanner, answerQuestion, dropQuestion);
+    await window.QuickbackQuestions.show(api, showBanner, answerQuestion, dropQuestion, openProgress, openProgressStats);
     window.scrollTo(0, 0);
   } catch (error) {
     showBanner(error.message);
@@ -1616,6 +1936,10 @@ async function showQuestions() {
 document.getElementById("tab-practice").addEventListener("click", showPractice);
 document.getElementById("tab-history").addEventListener("click", showHistory);
 document.getElementById("tab-questions").addEventListener("click", showQuestions);
+document.getElementById("tab-progress").addEventListener("click", () => {
+  const current = window.QuickbackProgress ? window.QuickbackProgress.questionId() : "";
+  openProgress(current);
+});
 
 turnsEl.addEventListener("click", (event) => {
   const button = event.target.closest("[data-retry]");
@@ -1623,6 +1947,45 @@ turnsEl.addEventListener("click", (event) => {
   const removeRetell = event.target.closest("[data-retell-delete]");
   if (removeRetell) {
     deleteRetell(Number(removeRetell.dataset.retellDelete), removeRetell.dataset.retellLevel || "", removeRetell.dataset.retellChunk || "");
+    return;
+  }
+  const coreDelete = event.target.closest("[data-core-delete]");
+  if (coreDelete) {
+    removeCore(Number(coreDelete.dataset.coreDelete), coreDelete.dataset.coreLevel || "", Number(coreDelete.dataset.coreNumber));
+    return;
+  }
+  const coreAdd = event.target.closest("[data-core-add]");
+  if (coreAdd) {
+    if (state.recording || state.busy) return;
+    state.addingCore = coreKey(Number(coreAdd.dataset.coreAdd), coreAdd.dataset.coreLevel || "");
+    state.coreDraft = { en: "" };
+    renderPractice();
+    return;
+  }
+  const coreCancel = event.target.closest("[data-core-cancel]");
+  if (coreCancel) {
+    state.addingCore = null;
+    state.coreDraft = null;
+    renderPractice();
+    return;
+  }
+  const coreSave = event.target.closest("[data-core-save]");
+  if (coreSave) {
+    saveCore(Number(coreSave.dataset.coreSave), coreSave.dataset.coreLevel || "");
+    return;
+  }
+  const core = event.target.closest("[data-core-say]");
+  if (core) {
+    const index = Number(core.dataset.coreSay);
+    const level = core.dataset.coreLevel || "";
+    const number = Number(core.dataset.coreNumber);
+    const slot = Number(core.dataset.coreSlot);
+    if (coreActive(index, level, number, slot)) {
+      stopRecording();
+      return;
+    }
+    if (state.recording) return;
+    startRecording(null, "", "", "", { index, level, number, slot });
     return;
   }
   const retell = event.target.closest("[data-retell]");
@@ -1647,6 +2010,10 @@ document.getElementById("history-list").addEventListener("click", async (event) 
     state.editingTurn = null;
     state.retake = null;
     state.retell = null;
+    state.drill = null;
+    state.coreNote = null;
+    state.addingCore = null;
+    state.coreDraft = null;
     discardTake();
     state.session = await api(`/api/sessions/${button.dataset.session}`);
     state.question = null;
