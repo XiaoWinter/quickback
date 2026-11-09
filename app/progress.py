@@ -12,8 +12,6 @@ _QUESTION = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _RUN = re.compile(r"^[a-f0-9]{32}$")
 _FILE = re.compile(r"^(?:pending|\d{2})\.(?:webm|m4a|mp3|wav|ogg)$")
 
-BONUS_FLOOR = 50
-BONUS_RATE = 0.2
 DRAFT_LIMIT = 8
 DRAFT_LENGTH = 120
 
@@ -25,12 +23,6 @@ def round_half_up(value: float) -> int:
 def weighted_raw(comprehensibility: int, relevance: int, fluency: int) -> int:
     value = comprehensibility * 0.4 + relevance * 0.3 + fluency * 0.3
     return max(0, min(100, round_half_up(value)))
-
-
-def bonus_points(raw: int, number: int) -> int:
-    if number <= 1 or raw < BONUS_FLOOR:
-        return 0
-    return round_half_up(raw * BONUS_RATE)
 
 
 def clean_drafts(raw) -> list[str]:
@@ -67,13 +59,21 @@ def summarize(answers: list[dict]) -> dict:
     if not answers:
         raise StorageError("先答完一题，再结束。")
     raws = [int(item["raw"]) for item in answers]
-    added = sum(int(item["bonus"]) for item in answers)
+    total = sum(raws)
     return {
-        "raw": raws[0],
-        "bonus": min(100, raws[0] + added),
-        "average": round_half_up(sum(raws) / len(raws)),
+        "raw": total,
+        "bonus": total,
+        "average": round_half_up(total / len(raws)),
         "count": len(raws),
     }
+
+
+def _follow(en: str, zh: str) -> dict | None:
+    en = " ".join(str(en or "").split())
+    zh = " ".join(str(zh or "").split())
+    if not re.search(r"[A-Za-z]", en):
+        return None
+    return {"en": en[:240], "zh": zh[:240]}
 
 
 def _duration(value) -> int | None:
@@ -86,14 +86,6 @@ def _duration(value) -> int | None:
     if number < 0 or number > 10 * 60 * 1000:
         return None
     return number
-
-
-def _follow(en: str, zh: str) -> dict | None:
-    en = " ".join(str(en or "").split())
-    zh = " ".join(str(zh or "").split())
-    if not re.search(r"[A-Za-z]", en):
-        return None
-    return {"en": en[:240], "zh": zh[:240]}
 
 
 class ProgressStore:
@@ -114,7 +106,7 @@ class ProgressStore:
                     run = self._read_dir(run_dir)
                     if not run or run.get("status") != "finished" or not isinstance(run.get("stats"), dict):
                         continue
-                    stats = run["stats"]
+                    stats = self._shown_stats(run) or {}
                     rows.append(
                         {
                             "id": run["id"],
@@ -206,7 +198,32 @@ class ProgressStore:
             self._write(run)
             return run["question_id"]
 
-    def save_pending(self, run_id: str, data: bytes, mime: str, duration_ms: int | None) -> str:
+    def align_prompts(self, question_id: str, prompts: list[dict]) -> None:
+        cleaned = []
+        for item in prompts or []:
+            if not isinstance(item, dict):
+                continue
+            prompt = _follow(item.get("en"), item.get("zh"))
+            if prompt:
+                cleaned.append(prompt)
+        with self._lock:
+            opened, _finished = self._runs(question_id)
+            if not opened or opened.get("status") != "open" or opened.get("pending"):
+                return
+            index = len(opened.get("answers") or [])
+            prompt = cleaned[index] if index < len(cleaned) else None
+            current = opened.get("pending_prompt") or {}
+            same_en = str(current.get("en") or "") == str((prompt or {}).get("en") or "")
+            same_zh = str(current.get("zh") or "") == str((prompt or {}).get("zh") or "")
+            if same_en and same_zh:
+                return
+            opened["pending_prompt"] = prompt
+            if prompt is None or not same_en:
+                opened["drafts"] = []
+            opened["updated_at"] = now_iso()
+            self._write(opened)
+
+    def save_pending(self, run_id: str, data: bytes, mime: str, duration_ms: int | None, retake: int | None = None) -> str:
         mime = normalize_mime(mime)
         ext = EXT_BY_MIME.get(mime)
         if not ext:
@@ -214,19 +231,26 @@ class ProgressStore:
         with self._lock:
             run = self._locate(run_id)
             self._require_open(run)
-            if not run.get("pending_prompt"):
+            answers = run.get("answers") or []
+            if retake is not None:
+                if isinstance(retake, bool) or not isinstance(retake, int) or not any(item.get("number") == retake for item in answers):
+                    raise StorageError("没有这道题。")
+            elif not run.get("pending_prompt"):
                 raise StorageError("这次可以结束了。")
             folder = self._folder(run)
             self._delete_pending_file(folder, run)
             filename = f"pending{ext}"
             (folder / filename).write_bytes(data)
-            run["pending"] = {
+            pending = {
                 "audio_file": filename,
                 "mime_type": mime,
                 "duration_ms": _duration(duration_ms),
                 "transcript": "",
                 "error": "",
             }
+            if retake is not None:
+                pending["retake"] = retake
+            run["pending"] = pending
             run["updated_at"] = now_iso()
             self._write(run)
             return run["question_id"]
@@ -239,9 +263,16 @@ class ProgressStore:
             path = self._named_file(self._folder(run), (pending or {}).get("audio_file"))
             if pending is None or path is None or not path.is_file():
                 raise StorageError("找不到这段录音。")
+            retake = pending.get("retake")
             prompt = run.get("pending_prompt") or {}
+            if isinstance(retake, int) and not isinstance(retake, bool):
+                matched = next((item for item in run.get("answers") or [] if item.get("number") == retake), None)
+                if matched:
+                    prompt = matched.get("prompt") or prompt
             earlier = []
             for item in run.get("answers") or []:
+                if isinstance(retake, int) and not isinstance(retake, bool) and int(item.get("number") or 0) >= retake:
+                    continue
                 asked = item.get("prompt") or {}
                 earlier.append((str(asked.get("en") or ""), str(item.get("transcript") or "")))
             return {
@@ -285,37 +316,62 @@ class ProgressStore:
             src = self._named_file(folder, pending.get("audio_file"))
             if src is None or not src.is_file():
                 raise StorageError("找不到这段录音。")
-            number = len(run.get("answers") or []) + 1
+            retake = pending.get("retake")
+            replacing = isinstance(retake, int) and not isinstance(retake, bool)
+            answers = run.setdefault("answers", [])
+            if replacing:
+                target = next((item for item in answers if item.get("number") == retake), None)
+                if target is None:
+                    raise StorageError("没有这道题。")
+                number = retake
+            else:
+                target = None
+                number = len(answers) + 1
             dest_name = f"{number:02d}{src.suffix.lower()}"
             if not _FILE.match(dest_name):
                 raise StorageError("这段录音的格式不支持。")
+            if target is not None:
+                old_name = target.get("audio_file")
+                if old_name and old_name != dest_name:
+                    old = self._named_file(folder, old_name)
+                    if old is not None and old.is_file():
+                        old.unlink()
             src.replace(folder / dest_name)
-            prompt = run.get("pending_prompt") or run.get("question") or {}
-            run.setdefault("answers", []).append(
-                {
-                    "number": number,
-                    "prompt": {"en": prompt.get("en") or "", "zh": prompt.get("zh") or ""},
-                    "audio_file": dest_name,
-                    "mime_type": pending.get("mime_type") or "application/octet-stream",
-                    "duration_ms": pending.get("duration_ms"),
-                    "transcript": transcript.strip()[:8000],
-                    "scores": {
-                        "comprehensibility": int(scores["comprehensibility"]),
-                        "relevance": int(scores["relevance"]),
-                        "fluency": int(scores["fluency"]),
-                    },
-                    "notes": {
-                        "comprehensibility": str(notes.get("comprehensibility") or ""),
-                        "relevance": str(notes.get("relevance") or ""),
-                        "fluency": str(notes.get("fluency") or ""),
-                    },
-                    "fixes": _stored_fixes(parsed.get("fixes")),
-                    "raw": raw,
-                    "bonus": bonus_points(raw, number),
-                }
-            )
+            scored = {
+                "audio_file": dest_name,
+                "mime_type": pending.get("mime_type") or "application/octet-stream",
+                "duration_ms": pending.get("duration_ms"),
+                "transcript": transcript.strip()[:8000],
+                "scores": {
+                    "comprehensibility": int(scores["comprehensibility"]),
+                    "relevance": int(scores["relevance"]),
+                    "fluency": int(scores["fluency"]),
+                },
+                "notes": {
+                    "comprehensibility": str(notes.get("comprehensibility") or ""),
+                    "relevance": str(notes.get("relevance") or ""),
+                    "fluency": str(notes.get("fluency") or ""),
+                },
+                "fixes": _stored_fixes(parsed.get("fixes")),
+                "raw": raw,
+                "bonus": 0,
+            }
+            if target is not None:
+                target.update(scored)
+            else:
+                prompt = run.get("pending_prompt") or run.get("question") or {}
+                answers.append(
+                    {
+                        "number": number,
+                        "prompt": {"en": prompt.get("en") or "", "zh": prompt.get("zh") or ""},
+                        "drafts": clean_drafts(run.get("drafts")),
+                        **scored,
+                    }
+                )
+                run["drafts"] = []
             run["pending"] = None
-            run["pending_prompt"] = _follow(parsed.get("follow_up") or "", parsed.get("follow_up_zh") or "")
+            if not replacing:
+                run["pending_prompt"] = None
             run["updated_at"] = now_iso()
             self._write(run)
             return run["question_id"]
@@ -471,6 +527,7 @@ class ProgressStore:
                     "scores": item.get("scores") or {},
                     "notes": item.get("notes") or {},
                     "fixes": item.get("fixes") if isinstance(item.get("fixes"), list) else None,
+                    "drafts": clean_drafts(item.get("drafts")),
                     "raw": int(item.get("raw") or 0),
                     "bonus": int(item.get("bonus") or 0),
                     "has_audio": bool(audio and audio.is_file()),
@@ -487,8 +544,17 @@ class ProgressStore:
             "finished_at": run.get("finished_at") or "",
             "question": run.get("question") or {"en": "", "zh": ""},
             "pending_prompt": run.get("pending_prompt"),
+            "pending_retake": pending.get("retake") if pending and isinstance(pending.get("retake"), int) else None,
             "drafts": clean_drafts(run.get("drafts")) if (run.get("status") or "open") == "open" else [],
             "pending_error": pending_error,
             "answers": answers,
-            "stats": run.get("stats"),
+            "stats": self._shown_stats(run),
         }
+
+    def _shown_stats(self, run: dict) -> dict | None:
+        if run.get("status") == "finished":
+            answers = run.get("answers")
+            if isinstance(answers, list) and answers:
+                return summarize(answers)
+        stats = run.get("stats")
+        return stats if isinstance(stats, dict) else None

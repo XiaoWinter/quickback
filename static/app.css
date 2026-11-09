@@ -172,6 +172,30 @@ h1 {
 
 .turn { display: grid; gap: 0.85rem; }
 .turn.is-retake { box-shadow: inset 0 0 0 1px var(--accent); }
+.turn-fold > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  width: fit-content;
+  cursor: pointer;
+  list-style: none;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+.fold-icon {
+  display: inline-flex;
+  width: 0.7rem;
+  height: 0.7rem;
+}
+.fold-icon svg { display: block; width: 100%; height: 100%; }
+.turn-fold[open] .fold-icon { transform: rotate(90deg); }
+.turn-fold > summary::-webkit-details-marker { display: none; }
+.turn-fold > summary::marker { content: ""; }
+.turn-fold[open] > summary { margin-bottom: 0.85rem; }
+.turn-fold[open] .when-closed,
+.turn-fold:not([open]) .when-open { display: none; }
+.turn-fold:not([open]) > .turn-body { display: none; }
+.turn-body { display: grid; gap: 0.85rem; }
 .turn-question { display: grid; gap: 0.3rem; }
 .turn-question .question-actions { margin-top: 0.2rem; }
 .retake-slot:empty { display: none; }
@@ -516,6 +540,7 @@ h1 {
 
 .record:disabled, .finish:disabled { opacity: 0.55; cursor: wait; }
 
+.finish.is-wide { flex: 1; }
 .finish {
   flex: none;
   min-width: 6.4rem;
@@ -692,88 +717,8 @@ h1 {
 .confirm-actions .primary { margin-top: 0; background: var(--accent); color: var(--accent-ink); }
 
 .progress-chart { margin-top: 0.85rem; }
-.progress-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.7rem 0.9rem;
-  color: var(--muted);
-  font-size: 0.76rem;
-}
-.progress-legend i {
-  display: inline-block;
-  width: 0.55rem;
-  height: 0.55rem;
-  margin-right: 0.28rem;
-  border-radius: 2px;
-  vertical-align: -1px;
-}
-.progress-legend .is-raw i { background: var(--label); }
-.progress-legend .is-bonus i { background: var(--heard); }
-.progress-legend .is-average i { background: var(--zh); }
-.progress-frame {
-  display: grid;
-  grid-template-columns: 1.8rem minmax(0, 1fr);
-  column-gap: 0.4rem;
-  align-items: start;
-  margin-top: 0.55rem;
-}
-.progress-chart.is-compact .progress-frame { grid-template-columns: minmax(0, 1fr); }
-.progress-axis {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  height: 128px;
-  color: var(--muted);
-  font-size: 0.68rem;
-  line-height: 1;
-  text-align: right;
-}
-.progress-plot {
-  position: relative;
-  display: flex;
-  align-items: flex-start;
-  gap: 1rem;
-  overflow-x: auto;
-}
-.progress-grid {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 128px;
-  border-bottom: 1px solid var(--line);
-  background-image:
-    linear-gradient(var(--line), var(--line)),
-    linear-gradient(var(--line), var(--line)),
-    linear-gradient(var(--line), var(--line)),
-    linear-gradient(var(--line), var(--line));
-  background-size: 100% 1px, 100% 1px, 100% 1px, 100% 1px;
-  background-position: 0 0, 0 25%, 0 50%, 0 75%;
-  background-repeat: no-repeat;
-  pointer-events: none;
-}
-.progress-chart.is-compact .progress-grid { height: 56px; }
-.progress-group { position: relative; z-index: 1; min-width: 3.6rem; }
-.progress-bars {
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 0.22rem;
-  height: 128px;
-}
-.progress-chart.is-compact .progress-bars { height: 56px; gap: 0.14rem; }
-.progress-bar { width: 0.72rem; border-radius: 4px 4px 0 0; }
-.progress-chart.is-compact .progress-bar { width: 0.48rem; }
-.progress-bar.is-raw { background: var(--label); }
-.progress-bar.is-bonus { background: var(--heard); }
-.progress-bar.is-average { background: var(--zh); }
-.progress-count {
-  display: block;
-  margin-top: 0.28rem;
-  color: var(--muted);
-  font-size: 0.72rem;
-  text-align: center;
-}
+.progress-plot { position: relative; width: 100%; height: 300px; }
+.progress-chart.is-compact .progress-plot { height: 120px; }
 .progress-latest { margin: 0.4rem 0 0; }
 .progress-answer { margin-top: 0.7rem; }
 .progress-answer .en-line { font-size: 1.2rem; }

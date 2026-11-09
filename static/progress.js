@@ -24,6 +24,7 @@
   let ignoreStop = false;
   let generation = 0;
   let afterFinish = null;
+  let retake = null;
 
   function formatWhen(iso) {
     const date = new Date(iso);
@@ -60,70 +61,116 @@
     timer = null;
   }
 
+  function cssColor(name, fallback) {
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
+  }
+
+  function chartRows(runs) {
+    return (runs || []).map((item) => {
+      const stats = item && item.stats ? item.stats : item || {};
+      const raw = Number(stats.raw);
+      const average = Number(stats.average);
+      if (!Number.isFinite(raw)) return null;
+      return {
+        raw,
+        average: Number.isFinite(average) ? average : 0,
+        count: Number(stats.count) || 0,
+        when: item && item.finished_at ? formatWhen(item.finished_at) : "",
+      };
+    }).filter(Boolean);
+  }
+
+  function releaseCharts(parent) {
+    if (!parent || !window.Chart) return;
+    parent.querySelectorAll("canvas").forEach((node) => {
+      const drawn = window.Chart.getChart(node);
+      if (drawn) drawn.destroy();
+    });
+  }
+
+  function barLayout(frame, groups, compact) {
+    const axisWidth = Math.max(140, (frame.clientWidth || 320) - 52);
+    const room = axisWidth / Math.max(1, groups);
+    const groupPx = Math.min(room * 0.8, compact ? 52 : Math.max(108, room * 0.36));
+    const gapPx = compact ? 2 : 4;
+    const slot = groupPx / 2;
+    return {
+      categoryPercentage: Math.min(0.9, groupPx / room),
+      barPercentage: Math.min(1, (slot - gapPx) / slot),
+    };
+  }
+
   function chart(runs, compact) {
-    const list = (runs || []).filter((item) => Number.isFinite(Number(item.raw)));
-    if (!list.length) return null;
+    const list = chartRows(runs);
+    if (!list.length || !window.Chart) return null;
     const box = document.createElement("div");
     box.className = compact ? "progress-chart is-compact" : "progress-chart";
-    const legend = document.createElement("div");
-    legend.className = "progress-legend";
-    [["is-raw", "原始分"], ["is-bonus", "带奖励分"], ["is-average", "平均每题"]].forEach(([name, label]) => {
-      const item = document.createElement("span");
-      item.className = name;
-      const swatch = document.createElement("i");
-      swatch.setAttribute("aria-hidden", "true");
-      item.append(swatch, document.createTextNode(label));
-      legend.appendChild(item);
-    });
     const frame = document.createElement("div");
-    frame.className = "progress-frame";
-    if (!compact) {
-      const axis = document.createElement("div");
-      axis.className = "progress-axis";
-      axis.setAttribute("aria-hidden", "true");
-      ["100", "50", "0"].forEach((mark) => {
-        const tick = document.createElement("span");
-        tick.textContent = mark;
-        axis.appendChild(tick);
-      });
-      frame.appendChild(axis);
-    }
-    const plot = document.createElement("div");
-    plot.className = "progress-plot";
-    const grid = document.createElement("div");
-    grid.className = "progress-grid";
-    grid.setAttribute("aria-hidden", "true");
-    plot.appendChild(grid);
-    list.forEach((run) => {
-      const group = document.createElement("div");
-      group.className = "progress-group";
-      group.setAttribute(
-        "aria-label",
-        `原始分 ${run.raw}，带奖励分 ${run.bonus}，平均每题 ${run.average}，${run.count} 题`,
-      );
-      const bars = document.createElement("div");
-      bars.className = "progress-bars";
-      [["is-raw", run.raw, "原始分"], ["is-bonus", run.bonus, "带奖励分"], ["is-average", run.average, "平均每题"]].forEach(([name, value, label]) => {
-        const score = Math.max(0, Math.min(100, Number(value) || 0));
-        const bar = document.createElement("div");
-        bar.className = `progress-bar ${name}`;
-        bar.style.height = `${score}%`;
-        if (score > 0) bar.style.minHeight = "2px";
-        bar.title = `${label} ${score}`;
-        bars.appendChild(bar);
-      });
-      const count = document.createElement("span");
-      count.className = "progress-count";
-      count.textContent = `${run.count} 题`;
-      group.append(bars, count);
-      plot.appendChild(group);
-    });
+    frame.className = "progress-plot";
+    const canvas = document.createElement("canvas");
+    const summary = list.map((item) => `${item.when || `${item.count} 题`}：原始分 ${item.raw}，平均每题 ${item.average}`).join("；");
+    canvas.setAttribute("role", "img");
+    canvas.setAttribute("aria-label", summary);
+    frame.appendChild(canvas);
     const last = list[list.length - 1];
     const latest = document.createElement("p");
     latest.className = "note progress-latest";
-    latest.textContent = `最近一次：原始 ${last.raw} · 带奖励 ${last.bonus} · 平均 ${last.average}`;
-    frame.appendChild(plot);
-    box.append(legend, frame, latest);
+    latest.textContent = `最近一次：原始 ${last.raw} · 平均 ${last.average}`;
+    box.append(frame, latest);
+    queueMicrotask(() => {
+      if (!canvas.isConnected || window.Chart.getChart(canvas)) return;
+      window.Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+      const peak = Math.max(...list.flatMap((item) => [item.raw, item.average]));
+      new window.Chart(canvas, {
+        type: "bar",
+        data: {
+          labels: list.map((item) => item.when || `${item.count} 题`),
+          datasets: [
+            {
+              label: "原始分",
+              data: list.map((item) => item.raw),
+              backgroundColor: cssColor("--label", "#3a322b"),
+              borderRadius: 6,
+            },
+            {
+              label: "平均每题",
+              data: list.map((item) => item.average),
+              backgroundColor: cssColor("--zh", "#9a4510"),
+              borderRadius: 6,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          datasets: {
+            bar: barLayout(frame, list.length, compact),
+          },
+          plugins: {
+            legend: {
+              position: "top",
+              align: "start",
+              labels: { color: cssColor("--muted", "#6f675e"), boxWidth: 10, boxHeight: 10, font: { size: compact ? 11 : 12 } },
+            },
+          },
+          scales: {
+            x: {
+              ticks: { color: cssColor("--muted", "#6f675e"), font: { size: compact ? 10 : 12 } },
+              grid: { display: false },
+              border: { color: cssColor("--line", "#e4dccf") },
+            },
+            y: {
+              beginAtZero: true,
+              suggestedMax: peak <= 100 ? 100 : undefined,
+              ticks: { color: cssColor("--muted", "#6f675e"), precision: 0, font: { size: compact ? 10 : 11 } },
+              grid: { color: cssColor("--line", "#e4dccf") },
+              border: { display: false },
+            },
+          },
+        },
+      });
+    });
     return box;
   }
 
@@ -166,13 +213,25 @@
     return box;
   }
 
-  function answerCard(run, item) {
+  function answerCard(run, item, canRetake) {
     const card = document.createElement("article");
     card.className = "card progress-answer";
+    if (retake === item.number) card.classList.add("is-retake");
+    const head = document.createElement("div");
+    head.className = "section-head";
     const kicker = document.createElement("p");
     kicker.className = "kicker";
     kicker.textContent = `问题 ${item.number}`;
-    card.appendChild(kicker);
+    head.appendChild(kicker);
+    if (canRetake) {
+      const actions = document.createElement("div");
+      actions.className = "question-actions";
+      const again = button(retake === item.number ? "取消重答" : "重答", "retake", "text-btn");
+      again.dataset.retake = String(item.number);
+      actions.appendChild(again);
+      head.appendChild(actions);
+    }
+    card.appendChild(head);
     const prompt = item.prompt || {};
     if ((prompt.en || "").trim()) {
       const en = document.createElement("p");
@@ -185,6 +244,25 @@
       zh.className = "zh-line";
       zh.textContent = prompt.zh;
       card.appendChild(zh);
+    }
+    const drafts = item.drafts || [];
+    if (drafts.length) {
+      const title = document.createElement("p");
+      title.className = "kicker";
+      title.textContent = "草稿";
+      card.appendChild(title);
+      drafts.forEach((text) => {
+        const line = document.createElement("p");
+        line.className = "note";
+        line.textContent = text;
+        card.appendChild(line);
+      });
+    }
+    if (retake === item.number) {
+      const slot = document.createElement("div");
+      slot.className = "retake-slot";
+      slot.dataset.retakeSlot = String(item.number);
+      card.appendChild(slot);
     }
     if ((item.transcript || "").trim()) {
       const said = document.createElement("p");
@@ -208,12 +286,6 @@
     const seconds = item.duration_ms ? ` · ${Math.max(1, Math.round(item.duration_ms / 1000))} 秒` : "";
     total.textContent = `这题 ${item.raw} 分${seconds}`;
     card.appendChild(total);
-    if (item.bonus > 0) {
-      const bonus = document.createElement("p");
-      bonus.className = "note";
-      bonus.textContent = `奖励 +${item.bonus}`;
-      card.appendChild(bonus);
-    }
     if (item.has_audio && run && run.id) {
       const player = recordingPlayer(`/api/progress/${run.id}/audio/${item.number}`, item.duration_ms);
       if (player) card.appendChild(player);
@@ -290,7 +362,7 @@
       start.disabled = uploading;
       root.appendChild(start);
     } else {
-      (open.answers || []).forEach((item) => root.appendChild(answerCard(open, item)));
+      (open.answers || []).forEach((item) => root.appendChild(answerCard(open, item, true)));
       if (!open.pending_error && !take && open.pending_prompt) {
         const prompt = document.createElement("section");
         prompt.className = "card prompt";
@@ -311,10 +383,13 @@
           zh.textContent = asked.zh;
           prompt.appendChild(zh);
         }
+        if (!retake) prompt.appendChild(draftPanel(open));
         root.appendChild(prompt);
       }
-      root.appendChild(draftPanel(open));
-      if (open.pending_error) {
+      if (retake) {
+        const slot = root.querySelector(`[data-retake-slot="${retake}"]`);
+        if (slot) slot.appendChild(retakeControls(open));
+      } else if (open.pending_error) {
         const failed = document.createElement("p");
         failed.className = "error-line";
         failed.textContent = open.pending_error;
@@ -324,18 +399,8 @@
         row.append(button("重试", "retry", "primary"), button("重说", "clear", "text-btn"));
         root.appendChild(row);
       } else if (take) {
-        const review = document.createElement("div");
-        review.className = "take-review";
-        const hint = document.createElement("p");
-        hint.className = "hint";
-        hint.textContent = "这段还在本机。听一遍，满意再送出。";
-        const player = recordingPlayer(takeUrl, take.durationMs);
-        const actions = document.createElement("div");
-        actions.className = "take-actions";
-        actions.append(button(uploading ? "正在评分…" : "就用这段", "send", "primary"), button("重说", "local-redo", "text-btn"));
-        review.append(hint, player, actions);
-        root.appendChild(review);
-      } else if (open.pending_prompt) {
+        root.appendChild(takeReview());
+      } else if (!retake && open.pending_prompt) {
         const recorder = document.createElement("section");
         recorder.className = "recorder";
         const row = document.createElement("div");
@@ -357,17 +422,28 @@
         hint.textContent = "点一下开始，说完再点一下。听完再决定要不要送出。中文卡住了就直接说中文。最长 3 分钟。";
         recorder.append(row, hint);
         root.appendChild(recorder);
-      } else if ((open.answers || []).length) {
+      } else if (!retake && (open.answers || []).length) {
         const done = document.createElement("p");
         done.className = "note";
         done.textContent = "这次可以结束了。";
-        root.appendChild(done);
+        const row = document.createElement("div");
+        row.className = "record-row";
+        const finish = button("结束这次", "finish", "finish is-wide");
+        const quit = button("放弃这次", "discard", "progress-quit");
+        finish.disabled = uploading;
+        quit.disabled = uploading;
+        row.append(finish, quit);
+        const recorder = document.createElement("section");
+        recorder.className = "recorder";
+        recorder.append(done, row);
+        root.appendChild(recorder);
       }
       const actions = document.createElement("div");
       actions.className = "progress-actions";
-      const finishBesideRecord = !open.pending_error && !take && open.pending_prompt && (open.answers || []).length;
-      if ((open.answers || []).length && !finishBesideRecord) actions.appendChild(button("结束这次", "finish", "text-btn"));
-      if (open.pending_error || take || !open.pending_prompt) {
+      const finishBesideRecord = !retake && !open.pending_error && !take && open.pending_prompt && (open.answers || []).length;
+      const readyToFinish = !retake && !open.pending_error && !take && !open.pending_prompt && (open.answers || []).length;
+      if (!retake && (open.answers || []).length && !finishBesideRecord && !readyToFinish) actions.appendChild(button("结束这次", "finish", "text-btn"));
+      if (!retake && !readyToFinish && (open.pending_error || take || !open.pending_prompt)) {
         actions.appendChild(button("放弃这次", "discard", "text-btn"));
       }
       actions.querySelectorAll("button").forEach((el) => {
@@ -385,9 +461,58 @@
     holdScroll(scrollY);
   }
 
+  function takeReview() {
+    const review = document.createElement("div");
+    review.className = "take-review";
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = retake ? "听一遍。送出后会替换这一题的回答和分数。" : "这段还在本机。听一遍，满意再送出。";
+    const player = recordingPlayer(takeUrl, take.durationMs);
+    const actions = document.createElement("div");
+    actions.className = "take-actions";
+    actions.append(button(uploading ? "正在评分…" : "就用这段", "send", "primary"), button("重说", "local-redo", "text-btn"));
+    review.append(hint, player, actions);
+    return review;
+  }
+
+  function retakeControls(open) {
+    const box = document.createElement("div");
+    if (open.pending_error && open.pending_retake === retake) {
+      const failed = document.createElement("p");
+      failed.className = "error-line";
+      failed.textContent = open.pending_error;
+      const row = document.createElement("div");
+      row.className = "progress-actions";
+      row.append(button("重试", "retry", "primary"), button("重说", "clear", "text-btn"));
+      box.append(failed, row);
+      return box;
+    }
+    if (take) {
+      box.appendChild(takeReview());
+      return box;
+    }
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent = "接下来的录音会替换这一题。";
+    const recorder = document.createElement("section");
+    recorder.className = "recorder";
+    const row = document.createElement("div");
+    row.className = "record-row";
+    const record = button(recording ? `说完了 ${formatClock(Date.now() - startedAt)}` : "开始说", "record", "record");
+    record.classList.toggle("is-recording", recording);
+    record.disabled = uploading;
+    row.appendChild(record);
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "点一下开始，说完再点一下。送出后会替换这一题的回答和分数。";
+    recorder.append(row, hint);
+    box.append(note, recorder);
+    return box;
+  }
+
   function draftPanel(open) {
-    const box = document.createElement("section");
-    box.className = "card progress-drafts";
+    const box = document.createElement("div");
+    box.className = "progress-drafts";
     const label = document.createElement("p");
     label.className = "kicker";
     label.textContent = "草稿";
@@ -434,7 +559,7 @@
       const summary = document.createElement("summary");
       const stats = run.stats || {};
       const when = formatWhen(run.finished_at);
-      summary.textContent = `${when} · 原始 ${stats.raw} · 带奖励 ${stats.bonus} · 平均 ${stats.average} · ${stats.count} 题`;
+      summary.textContent = `${when} · 原始 ${stats.raw} · 平均 ${stats.average} · ${stats.count} 题`;
       details.appendChild(summary);
       (run.answers || []).forEach((item) => details.appendChild(answerCard(run, item)));
       parent.appendChild(details);
@@ -443,6 +568,7 @@
 
   function renderStats(page, onBack) {
     if (!statsRoot) return;
+    releaseCharts(statsRoot);
     statsRoot.replaceChildren();
     const question = (page && page.question) || {};
     const head = document.createElement("section");
@@ -471,7 +597,7 @@
       head.appendChild(zh);
     }
     const runs = (page && page.runs) || [];
-    const drawn = chart(runs.map((item) => item.stats).filter(Boolean), false);
+    const drawn = chart(runs.filter((item) => item.stats), false);
     if (drawn) head.appendChild(drawn);
     else {
       const empty = document.createElement("p");
@@ -573,7 +699,11 @@
     uploading = true;
     render();
     try {
-      view = await api(`/api/progress/${view.open.id}/answers`, { method: "POST", body: form });
+      const path = retake
+        ? `/api/progress/${view.open.id}/answers/${retake}/retake`
+        : `/api/progress/${view.open.id}/answers`;
+      view = await api(path, { method: "POST", body: form });
+      retake = null;
       setTake(null, 0);
       report("");
       render();
@@ -696,6 +826,15 @@
         removeDraft(Number(target.dataset.draft));
         return;
       }
+      if (action === "retake") {
+        if (recording || uploading) return;
+        const number = Number(target.dataset.retake);
+        setTake(null, 0);
+        retake = retake === number ? null : number;
+        report("");
+        render();
+        return;
+      }
       if (action === "record") {
         if (recording) stop();
         else start();
@@ -743,6 +882,7 @@
         ignoreStop = recording;
         if (recording) stop();
         setTake(null, 0);
+        retake = null;
       }
       questionId = id || "";
       if (!questionId) {
@@ -780,6 +920,7 @@
       uploading = false;
       questionId = "";
       view = null;
+      retake = null;
       setTake(null, 0);
       render();
     },

@@ -195,11 +195,27 @@ def questions_remove(question_id: str):
     return {"ok": True}
 
 
+def _practice_prompts(question: dict) -> list[dict]:
+    topic = {"en": str(question.get("en") or "").strip(), "zh": str(question.get("zh") or "").strip()}
+    session = store.latest_for_question(str(question.get("id") or ""))
+    found = []
+    if session:
+        for turn in session.get("turns") or []:
+            if not isinstance(turn, dict):
+                continue
+            prompt = turn.get("prompt") if isinstance(turn.get("prompt"), dict) else {}
+            en = str(prompt.get("en") or "").strip()
+            if en:
+                found.append({"en": en, "zh": str(prompt.get("zh") or "").strip()})
+    return found or ([topic] if topic["en"] else [])
+
+
 def _progress_page(question_id: str) -> dict:
     try:
         question = get_question(question_id)
     except QuestionError as exc:
         raise HTTPException(status_code=404, detail="没有这道题。") from exc
+    progress.align_prompts(question_id, _practice_prompts(question))
     return progress.page(question)
 
 
@@ -217,7 +233,7 @@ def progress_start(question_id: str):
         raise HTTPException(status_code=404, detail="没有这道题。") from exc
     except StorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return progress.page(question)
+    return _progress_page(question_id)
 
 
 def _progress_question_page(question_id: str) -> dict:
@@ -263,6 +279,29 @@ async def progress_answer(
     mime = normalize_mime(mime_type or audio.content_type)
     try:
         question_id = progress.save_pending(run_id, data, mime, duration_ms)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _score_progress(run_id, question_id)
+
+
+@app.post("/api/progress/{run_id}/answers/{number}/retake")
+async def progress_retake(
+    run_id: str,
+    number: int,
+    audio: UploadFile = File(...),
+    mime_type: str | None = Form(None),
+    duration_ms: int | None = Form(None),
+):
+    data = await audio.read()
+    if len(data) < MIN_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="录音太短了，再说长一点。")
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="这段录音太长了，控制在 3 分钟内。")
+    mime = normalize_mime(mime_type or audio.content_type)
+    try:
+        question_id = progress.save_pending(run_id, data, mime, duration_ms, number)
     except NotFound as exc:
         raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
     except StorageError as exc:

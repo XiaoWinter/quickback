@@ -23,6 +23,7 @@ const state = {
   addingCore: null,
   coreDraft: null,
   fillingCore: false,
+  folded: new Set(),
 };
 
 let questionToken = 0;
@@ -40,6 +41,7 @@ const newBtn = document.getElementById("new-question");
 const providerSelect = document.getElementById("provider");
 const reviewEl = document.getElementById("take-review");
 const PLAY_ICON = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.1 2.15 10 6 4.1 9.85z" fill="currentColor"/></svg>';
+const FOLD_ICON = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.15 2.2 8.7 6 4.15 9.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const PAUSE_ICON = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 2h2.1v8H3zm3.9 0H9v8H6.9z" fill="currentColor"/></svg>';
 
 function setPlayIcon(button, playing) {
@@ -522,6 +524,37 @@ function shownChanges(turn, feedback) {
   });
 }
 
+function foldKey(turn) {
+  const id = state.session && state.session.id ? state.session.id : "";
+  return `${id}:${turn.index}`;
+}
+
+function turnFold(turn) {
+  const details = document.createElement("details");
+  details.className = "turn-fold";
+  details.open = !state.folded.has(foldKey(turn));
+  const summary = document.createElement("summary");
+  const icon = document.createElement("span");
+  icon.className = "fold-icon";
+  icon.innerHTML = FOLD_ICON;
+  const opened = document.createElement("span");
+  opened.className = "when-open";
+  opened.textContent = "收起";
+  const closed = document.createElement("span");
+  closed.className = "when-closed";
+  closed.textContent = "展开";
+  summary.append(icon, opened, closed);
+  const body = document.createElement("div");
+  body.className = "turn-body";
+  details.append(summary, body);
+  details.addEventListener("toggle", () => {
+    const key = foldKey(turn);
+    if (details.open) state.folded.delete(key);
+    else state.folded.add(key);
+  });
+  return { details, body };
+}
+
 function renderTurn(turn) {
   const card = document.createElement("article");
   card.className = "card turn";
@@ -530,6 +563,8 @@ function renderTurn(turn) {
   const archived = sessionArchived();
   card.appendChild(sectionHead(`第 ${turn.index} 段`, archived || state.editingTurn === turn.index ? null : turnActions(turn.index)));
   card.appendChild(renderTurnQuestion(turn));
+  const fold = turnFold(turn);
+  card.appendChild(fold.details);
 
   const feedback = turn.feedback || null;
   const said = document.createElement("div");
@@ -539,17 +574,17 @@ function renderTurn(turn) {
   const seconds = turn.duration_ms ? ` · ${Math.round(turn.duration_ms / 1000)} 秒` : "";
   addLine(said, "meta", `${formatWhen(turn.created_at)}${seconds}`);
   said.appendChild(window.QuickbackPlayer.create(mediaSrc("audio", turn), "metadata", (turn.duration_ms || 0) / 1000));
-  card.appendChild(said);
+  fold.body.appendChild(said);
 
   if (turn.status === "error") {
-    addLine(card, "error-line", turn.error || "这次没有生成反馈。");
+    addLine(fold.body, "error-line", turn.error || "这次没有生成反馈。");
     if (archived) return card;
     const retry = document.createElement("button");
     retry.type = "button";
     retry.className = "retry";
     retry.dataset.retry = String(turn.index);
     retry.textContent = "重试这一段";
-    card.appendChild(retry);
+    fold.body.appendChild(retry);
     return card;
   }
 
@@ -574,7 +609,7 @@ function renderTurn(turn) {
   natural.appendChild(corrected);
   const variants = renderVariants(turn);
   if (variants) natural.appendChild(variants);
-  card.appendChild(natural);
+  fold.body.appendChild(natural);
 
   renderEcho(corrected, turn, "");
 
@@ -610,7 +645,7 @@ function renderTurn(turn) {
   });
   if (extList.childElementCount) extras.appendChild(extList);
   else addLine(extras, "note", "这次没有延伸。");
-  card.appendChild(extras);
+  fold.body.appendChild(extras);
   renderReview(card, feedback);
   return card;
 }

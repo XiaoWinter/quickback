@@ -256,9 +256,6 @@ Do not invent a mistake. Do not rewrite the whole answer. Do not turn Chinese th
 If the answer has no such mistake, fixes is [].
 These fixes do not change the three scores.
 
-follow_up is one easy English question a friend would ask next, about a concrete detail they mentioned. Stay on the topic. Do not repeat an earlier question.
-follow_up_zh is a short Simplified Chinese gloss of follow_up.
-
 Return one JSON object and nothing else:
-{{"comprehensibility": 0, "relevance": 0, "fluency": 0, "comprehensibility_note": "简体中文", "relevance_note": "简体中文", "fluency_note": "简体中文", "fixes": [{{"spoken": "he go", "better": "he went", "note": "讲过去的事，用 went。"}}], "follow_up": "one English question", "follow_up_zh": "简体中文"}}
+{{"comprehensibility": 0, "relevance": 0, "fluency": 0, "comprehensibility_note": "简体中文", "relevance_note": "简体中文", "fluency_note": "简体中文", "fixes": [{{"spoken": "he go", "better": "he went", "note": "讲过去的事，用 went。"}}]}}
 """

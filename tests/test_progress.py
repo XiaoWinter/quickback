@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from app.gemini_client import ModelError, parse_progress_score
-from app.progress import ProgressStore, bonus_points, summarize, weighted_raw
+from app.progress import ProgressStore, summarize, weighted_raw
 from app.storage import StorageError
 
 
@@ -22,14 +22,10 @@ def _scores(comp, rel, flu):
 
 
 class ScoreTests(unittest.TestCase):
-    def test_weights_and_follow_up_bonus(self):
+    def test_weights(self):
         self.assertEqual(weighted_raw(80, 70, 60), 71)
-        self.assertEqual(bonus_points(80, 1), 0)
-        self.assertEqual(bonus_points(49, 2), 0)
-        self.assertEqual(bonus_points(50, 2), 10)
-        self.assertEqual(bonus_points(80, 2), 16)
 
-    def test_summary_caps_the_bonus_and_averages_raw_scores(self):
+    def test_summary_ignores_follow_up_bonus(self):
         answers = [
             {"raw": 80, "bonus": 0},
             {"raw": 100, "bonus": 20},
@@ -37,8 +33,8 @@ class ScoreTests(unittest.TestCase):
             {"raw": 100, "bonus": 20},
         ]
         stats = summarize(answers)
-        self.assertEqual(stats["raw"], 80)
-        self.assertEqual(stats["bonus"], 100)
+        self.assertEqual(stats["raw"], 380)
+        self.assertEqual(stats["bonus"], 380)
         self.assertEqual(stats["average"], 95)
         self.assertEqual(stats["count"], 4)
 
@@ -120,26 +116,95 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(saved["stats"]["bonus"], 90)
             self.assertEqual(saved["answers"][0]["bonus"], 0)
 
-            second = self._answer(
-                store,
-                question,
-                [(90, "I like cats."), (80, "I have one cat."), (40, "Maybe.")],
-            )
-            store.finish(second)
+            second = store.open_run(question)
+            store.save_pending(second["id"], b"x" * 500, "audio/webm", 4000)
+            store.add_draft(second["id"], "先说猫")
+            store.commit_answer(second["id"], "I have one cat.", _scores(80, 80, 80))
+            self.assertIsNone(store.page(question)["open"]["pending_prompt"])
+            self.assertEqual(store.page(question)["open"]["answers"][0]["drafts"], ["先说猫"])
+            self.assertEqual(store.page(question)["open"]["drafts"], [])
+            store.align_prompts(question["id"], [
+                {"en": "What animals do you like?", "zh": "你喜欢什么动物？"},
+                {"en": "How often do you check?", "zh": "你多久检查一次？"},
+            ])
+            asked = store.page(question)["open"]["pending_prompt"]
+            self.assertEqual(asked["en"], "How often do you check?")
+            store.add_draft(second["id"], "每天看一次")
+            store.save_pending(second["id"], b"y" * 500, "audio/webm", 4000)
+            extra = _scores(70, 70, 70)
+            extra["follow_up"] = "And then?"
+            extra["follow_up_zh"] = "然后呢？"
+            store.commit_answer(second["id"], "Yes, a cat.", extra)
+            self.assertIsNone(store.page(question)["open"]["pending_prompt"])
+            with self.assertRaises(StorageError):
+                store.save_pending(second["id"], b"z" * 500, "audio/webm", 4000)
+            store.save_pending(second["id"], b"w" * 500, "audio/webm", 3000, 1)
+            store.commit_answer(second["id"], "I like dogs.", _scores(60, 60, 60))
+            replaced = store.page(question)["open"]
+            self.assertEqual(replaced["answers"][0]["transcript"], "I like dogs.")
+            self.assertEqual(replaced["answers"][0]["drafts"], ["先说猫"])
+            self.assertEqual(replaced["answers"][1]["prompt"]["en"], "How often do you check?")
+            self.assertIsNone(replaced["pending_prompt"])
+            store.finish(second["id"])
             again = json.loads((Path(tmp) / "animals" / first / "run.json").read_text(encoding="utf-8"))
             self.assertEqual(again["stats"], saved["stats"])
-            later = json.loads((Path(tmp) / "animals" / second / "run.json").read_text(encoding="utf-8"))
-            self.assertEqual(later["stats"]["raw"], 90)
-            self.assertEqual(later["stats"]["bonus"], 100)
-            self.assertEqual(later["stats"]["average"], 70)
-            self.assertEqual(later["stats"]["count"], 3)
-            self.assertEqual(later["answers"][1]["bonus"], 16)
-            self.assertEqual(later["answers"][1]["prompt"]["en"], "Do you have one?")
-            self.assertEqual(later["answers"][2]["bonus"], 0)
+            later = json.loads((Path(tmp) / "animals" / second["id"] / "run.json").read_text(encoding="utf-8"))
+            self.assertIsNone(later["pending_prompt"])
+            self.assertEqual(later["stats"]["raw"], 130)
+            self.assertEqual(later["stats"]["bonus"], 130)
+            self.assertEqual(later["stats"]["average"], 65)
+            self.assertEqual(later["stats"]["count"], 2)
+            self.assertEqual(later["answers"][0]["bonus"], 0)
+            self.assertEqual(later["answers"][0]["prompt"]["en"], "What animals do you like?")
+            self.assertEqual(later["answers"][0]["drafts"], ["先说猫"])
+            self.assertEqual(later["answers"][1]["bonus"], 0)
+            self.assertEqual(later["answers"][1]["drafts"], ["每天看一次"])
+            self.assertEqual(later["answers"][1]["prompt"]["en"], "How often do you check?")
             charts = store.charts()["animals"]
-            self.assertEqual(sorted(item["count"] for item in charts), [1, 3])
-            self.assertFalse((Path(tmp) / "animals" / second / "pending.webm").exists())
-            self.assertTrue((Path(tmp) / "animals" / second / "03.webm").is_file())
+            self.assertEqual(sorted(item["count"] for item in charts), [1, 2])
+            stale = json.loads((Path(tmp) / "animals" / second["id"] / "run.json").read_text(encoding="utf-8"))
+            stale["stats"]["raw"] = 60
+            stale["stats"]["bonus"] = 60
+            (Path(tmp) / "animals" / second["id"] / "run.json").write_text(
+                json.dumps(stale, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            shown = next(item["stats"] for item in store.page(question)["runs"] if item["id"] == second["id"])
+            self.assertEqual(shown["raw"], 130)
+            chart = next(item for item in store.charts()["animals"] if item["id"] == second["id"])
+            self.assertEqual(chart["raw"], 130)
+            self.assertFalse((Path(tmp) / "animals" / second["id"] / "pending.webm").exists())
+            self.assertTrue((Path(tmp) / "animals" / second["id"] / "02.webm").is_file())
+
+    def test_open_run_follows_answered_practice_turns(self):
+        question = {"id": "animals", "en": "What animals do you like?", "zh": "你喜欢什么动物？"}
+        prompts = [
+            {"en": "What animals do you like?", "zh": "你喜欢什么动物？"},
+            {"en": "What do they eat?", "zh": "它们吃什么？"},
+            {"en": "Do you give hay?", "zh": "你给干草吗？"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ProgressStore(Path(tmp))
+            opened = store.open_run(question)
+            store.add_draft(opened["id"], "frequency")
+            store.align_prompts(question["id"], prompts)
+            self.assertEqual(store.page(question)["open"]["drafts"], ["frequency"])
+            store.save_pending(opened["id"], b"a" * 500, "audio/webm", 4000)
+            store.align_prompts(question["id"], prompts + [{"en": "How often?", "zh": "多久？"}])
+            store.commit_answer(opened["id"], "I like cats.", _scores(80, 80, 80))
+            store.add_draft(opened["id"], "frequency")
+            store.align_prompts(question["id"], prompts)
+            page = store.page(question)["open"]
+            self.assertEqual(page["pending_prompt"]["en"], "What do they eat?")
+            self.assertEqual(page["drafts"], [])
+            store.save_pending(opened["id"], b"b" * 500, "audio/webm", 4000)
+            store.commit_answer(opened["id"], "Hay.", _scores(70, 70, 70))
+            store.align_prompts(question["id"], prompts)
+            self.assertEqual(store.page(question)["open"]["pending_prompt"]["en"], "Do you give hay?")
+            store.save_pending(opened["id"], b"c" * 500, "audio/webm", 4000)
+            store.commit_answer(opened["id"], "Every day.", _scores(70, 70, 70))
+            store.align_prompts(question["id"], prompts)
+            self.assertIsNone(store.page(question)["open"]["pending_prompt"])
 
     def test_draft_prompts_stay_on_the_open_run(self):
         question = {"id": "animals", "en": "What animals do you like?", "zh": "你喜欢什么动物？"}
