@@ -6,11 +6,13 @@ import threading
 import uuid
 from pathlib import Path
 
+from app.prompts import question_form
 from app.storage import EXT_BY_MIME, NotFound, StorageError, normalize_mime, now_iso
 
 _QUESTION = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _RUN = re.compile(r"^[a-f0-9]{32}$")
 _FILE = re.compile(r"^(?:pending|\d{2})\.(?:webm|m4a|mp3|wav|ogg)$")
+_CORRECTED = re.compile(r"^\d{2}-corrected\.wav$")
 
 DRAFT_LIMIT = 8
 DRAFT_LENGTH = 120
@@ -20,8 +22,11 @@ def round_half_up(value: float) -> int:
     return int(math.floor(float(value) + 0.5))
 
 
-def weighted_raw(comprehensibility: int, relevance: int, fluency: int) -> int:
-    value = comprehensibility * 0.4 + relevance * 0.3 + fluency * 0.3
+def weighted_raw(comprehensibility: int, relevance: int, fluency: int, content: int | None = None) -> int:
+    if content is None:
+        value = comprehensibility * 0.4 + relevance * 0.3 + fluency * 0.3
+    else:
+        value = comprehensibility * 0.3 + relevance * 0.2 + fluency * 0.2 + int(content) * 0.3
     return max(0, min(100, round_half_up(value)))
 
 
@@ -86,6 +91,12 @@ def _duration(value) -> int | None:
     if number < 0 or number > 10 * 60 * 1000:
         return None
     return number
+
+
+def _with_form(prompt):
+    if not isinstance(prompt, dict):
+        return prompt
+    return {**prompt, "form": question_form(prompt.get("en"))}
 
 
 class ProgressStore:
@@ -286,6 +297,7 @@ class ProgressStore:
                 "prompt_zh": prompt.get("zh") or "",
                 "earlier": earlier,
                 "question_id": run["question_id"],
+                "number": int(retake) if isinstance(retake, int) and not isinstance(retake, bool) else len(run.get("answers") or []) + 1,
             }
 
     def fail_pending(self, run_id: str, error: str, transcript: str = "") -> str:
@@ -305,7 +317,13 @@ class ProgressStore:
     def commit_answer(self, run_id: str, transcript: str, parsed: dict) -> str:
         scores = parsed.get("scores") or {}
         notes = parsed.get("notes") or {}
-        raw = weighted_raw(int(scores["comprehensibility"]), int(scores["relevance"]), int(scores["fluency"]))
+        content = scores.get("content") if "content" in scores else None
+        raw = weighted_raw(
+            int(scores["comprehensibility"]),
+            int(scores["relevance"]),
+            int(scores["fluency"]),
+            None if content is None else int(content),
+        )
         with self._lock:
             run = self._locate(run_id)
             self._require_open(run)
@@ -353,9 +371,19 @@ class ProgressStore:
                     "fluency": str(notes.get("fluency") or ""),
                 },
                 "fixes": _stored_fixes(parsed.get("fixes")),
+                "natural": str(parsed.get("natural") or "")[:800],
+                "natural_zh": str(parsed.get("natural_zh") or "")[:800],
                 "raw": raw,
                 "bonus": 0,
             }
+            if content is not None:
+                scored["scores"]["content"] = int(content)
+                scored["notes"]["content"] = str(notes.get("content") or "")
+            if not scored["natural"]:
+                scored["corrected_file"] = ""
+                stale = folder / f"{number:02d}-corrected.wav"
+                if stale.is_file():
+                    stale.unlink()
             if target is not None:
                 target.update(scored)
             else:
@@ -424,6 +452,41 @@ class ProgressStore:
         folder = self.root / question_id
         if folder.is_dir():
             shutil.rmtree(folder)
+
+    def save_corrected(self, run_id: str, number: int, data: bytes) -> None:
+        name = f"{int(number):02d}-corrected.wav"
+        if not _CORRECTED.match(name) or not data:
+            raise StorageError("没有可以保存的修正版发音。")
+        with self._lock:
+            run = self._locate(run_id)
+            target = next(
+                (item for item in run.get("answers") or [] if int(item.get("number") or 0) == int(number)),
+                None,
+            )
+            if target is None:
+                raise NotFound("没有这道题。")
+            path = self._folder(run) / name
+            path.write_bytes(data)
+            target["corrected_file"] = name
+            run["updated_at"] = now_iso()
+            self._write(run)
+
+    def corrected_path(self, run_id: str, number: int) -> Path:
+        name = f"{int(number):02d}-corrected.wav"
+        if not _CORRECTED.match(name):
+            raise NotFound("找不到这段修正版。")
+        with self._lock:
+            run = self._locate(run_id)
+            for item in run.get("answers") or []:
+                if int(item.get("number") or 0) != int(number):
+                    continue
+                if item.get("corrected_file") != name:
+                    break
+                path = self._folder(run) / name
+                if path.is_file() and path.stat().st_size > 0:
+                    return path
+                break
+        raise NotFound("找不到这段修正版。")
 
     def audio_path(self, run_id: str, number: int) -> tuple[Path, str]:
         with self._lock:
@@ -512,16 +575,25 @@ class ProgressStore:
         if path is not None and path.is_file():
             path.unlink()
 
+    def _has_corrected(self, folder: Path, item: dict) -> bool:
+        name = str(item.get("corrected_file") or "")
+        if not _CORRECTED.match(name):
+            return False
+        path = folder / name
+        return path.is_file() and path.stat().st_size > 0 and path.parent == folder
+
     def _public(self, run: dict) -> dict:
         folder = self._folder(run)
         pending = run.get("pending") if isinstance(run.get("pending"), dict) else None
         answers = []
         for item in run.get("answers") or []:
             audio = self._named_file(folder, item.get("audio_file"))
+            prompt = item.get("prompt") if isinstance(item.get("prompt"), dict) else {}
             answers.append(
                 {
                     "number": item.get("number"),
-                    "prompt": item.get("prompt") or {"en": "", "zh": ""},
+                    "prompt": prompt or {"en": "", "zh": ""},
+                    "form": question_form(prompt.get("en")),
                     "transcript": item.get("transcript") or "",
                     "duration_ms": item.get("duration_ms"),
                     "scores": item.get("scores") or {},
@@ -531,6 +603,9 @@ class ProgressStore:
                     "raw": int(item.get("raw") or 0),
                     "bonus": int(item.get("bonus") or 0),
                     "has_audio": bool(audio and audio.is_file()),
+                    "natural": str(item.get("natural") or ""),
+                    "natural_zh": str(item.get("natural_zh") or ""),
+                    "has_corrected": self._has_corrected(folder, item),
                 }
             )
         pending_error = ""
@@ -543,7 +618,7 @@ class ProgressStore:
             "created_at": run.get("created_at") or "",
             "finished_at": run.get("finished_at") or "",
             "question": run.get("question") or {"en": "", "zh": ""},
-            "pending_prompt": run.get("pending_prompt"),
+            "pending_prompt": _with_form(run.get("pending_prompt")),
             "pending_retake": pending.get("retake") if pending and isinstance(pending.get("retake"), int) else None,
             "drafts": clean_drafts(run.get("drafts")) if (run.get("status") or "open") == "open" else [],
             "pending_error": pending_error,

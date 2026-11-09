@@ -4,6 +4,7 @@
     ["comprehensibility", "可理解性"],
     ["relevance", "切题"],
     ["fluency", "流利度"],
+    ["content", "内容"],
   ];
   const root = document.getElementById("progress-root");
   const statsRoot = document.getElementById("progress-stats-root");
@@ -25,6 +26,9 @@
   let generation = 0;
   let afterFinish = null;
   let retake = null;
+  const speechReady = new Set();
+  const speechJobs = new Set();
+  const speechNotes = new Map();
 
   function formatWhen(iso) {
     const date = new Date(iso);
@@ -122,24 +126,62 @@
       if (!canvas.isConnected || window.Chart.getChart(canvas)) return;
       window.Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
       const peak = Math.max(...list.flatMap((item) => [item.raw, item.average]));
+      const label = cssColor("--label", "#3a322b");
+      const zh = cssColor("--zh", "#9a4510");
+      const card = cssColor("--card", "#fffdf8");
+      const point = compact ? 3 : 4;
+      const rows = [
+        ["原始分", list.map((item) => item.raw), label],
+        ["平均每题", list.map((item) => item.average), zh],
+      ];
       new window.Chart(canvas, {
         type: "bar",
+        plugins: [{
+          id: "alignTrend",
+          beforeDatasetsDraw(chart) {
+            const metas = chart.data.datasets.map((_, index) => chart.getDatasetMeta(index));
+            metas.forEach((line) => {
+              if (line.type !== "line") return;
+              const name = chart.data.datasets[line.index].label;
+              const bar = metas.find((meta) => meta.type === "bar" && chart.data.datasets[meta.index].label === name);
+              if (!bar) return;
+              line.data.forEach((dot, index) => {
+                const source = bar.data[index];
+                if (!source || !dot) return;
+                dot.x = source.x;
+                dot.cp1x = source.x;
+                dot.cp2x = source.x;
+              });
+            });
+          },
+        }],
         data: {
           labels: list.map((item) => item.when || `${item.count} 题`),
-          datasets: [
+          datasets: rows.flatMap(([name, data, color]) => [
             {
-              label: "原始分",
-              data: list.map((item) => item.raw),
-              backgroundColor: cssColor("--label", "#3a322b"),
+              type: "bar",
+              label: name,
+              data,
+              backgroundColor: color,
               borderRadius: 6,
+              order: 2,
             },
             {
-              label: "平均每题",
-              data: list.map((item) => item.average),
-              backgroundColor: cssColor("--zh", "#9a4510"),
-              borderRadius: 6,
+              type: "line",
+              label: name,
+              data,
+              borderColor: color,
+              backgroundColor: color,
+              pointBackgroundColor: card,
+              pointBorderColor: color,
+              pointBorderWidth: 2,
+              borderWidth: 2,
+              pointRadius: point,
+              pointHoverRadius: point + 2,
+              tension: 0,
+              order: 1,
             },
-          ],
+          ]),
         },
         options: {
           responsive: true,
@@ -151,7 +193,22 @@
             legend: {
               position: "top",
               align: "start",
-              labels: { color: cssColor("--muted", "#6f675e"), boxWidth: 10, boxHeight: 10, font: { size: compact ? 11 : 12 } },
+              onClick(event, item, legend) {
+                const chart = legend.chart;
+                const name = chart.data.datasets[item.datasetIndex].label;
+                const visible = !chart.isDatasetVisible(item.datasetIndex);
+                chart.data.datasets.forEach((dataset, index) => {
+                  if (dataset.label === name) chart.setDatasetVisibility(index, visible);
+                });
+                chart.update();
+              },
+              labels: {
+                color: cssColor("--muted", "#6f675e"),
+                boxWidth: 10,
+                boxHeight: 10,
+                font: { size: compact ? 11 : 12 },
+                filter: (item, data) => data.datasets[item.datasetIndex].type !== "line",
+              },
             },
           },
           scales: {
@@ -213,6 +270,15 @@
     return box;
   }
 
+  function appendForm(parent, form) {
+    const text = form === "closed" ? "这题直接答" : form === "open" ? "这题可以展开" : "";
+    if (!text) return;
+    const line = document.createElement("p");
+    line.className = "note";
+    line.textContent = text;
+    parent.appendChild(line);
+  }
+
   function answerCard(run, item, canRetake) {
     const card = document.createElement("article");
     card.className = "card progress-answer";
@@ -245,6 +311,7 @@
       zh.textContent = prompt.zh;
       card.appendChild(zh);
     }
+    appendForm(card, item.form);
     const drafts = item.drafts || [];
     if (drafts.length) {
       const title = document.createElement("p");
@@ -270,6 +337,7 @@
       said.textContent = item.transcript.trim();
       card.appendChild(said);
     }
+    attachCorrected(card, item.corrected_speech);
     DIMENSIONS.forEach(([key, label]) => {
       const scores = item.scores || {};
       if (scores[key] == null || scores[key] === "") return;
@@ -291,6 +359,69 @@
       if (player) card.appendChild(player);
     }
     return card;
+  }
+
+  function attachCorrected(card, ref) {
+    if (!ref || (!ref.session_id && !(ref.natural || "").trim() && !ref.audio_url)) return;
+    const box = document.createElement("div");
+    box.className = "progress-corrected";
+    const label = document.createElement("p");
+    label.className = "block-label rank-2";
+    label.textContent = "修正版";
+    box.appendChild(label);
+    if ((ref.natural || "").trim()) {
+      const line = document.createElement("p");
+      line.className = "progress-said";
+      line.textContent = ref.natural.trim();
+      box.appendChild(line);
+    }
+    if ((ref.natural_zh || "").trim()) {
+      const zh = document.createElement("p");
+      zh.className = "zh-line";
+      zh.textContent = ref.natural_zh.trim();
+      box.appendChild(zh);
+    }
+    const src = ref.audio_url || "";
+    const key = `${ref.session_id}:${ref.index}`;
+    if ((ref.has_speech || speechReady.has(key)) && src) {
+      const player = recordingPlayer(src, 0);
+      if (player) box.appendChild(player);
+      card.appendChild(box);
+      return;
+    }
+    if (!ref.session_id) {
+      card.appendChild(box);
+      return;
+    }
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent = "正在准备发音…";
+    box.appendChild(note);
+    card.appendChild(box);
+    let notes = speechNotes.get(key);
+    if (!notes) {
+      notes = new Set();
+      speechNotes.set(key, notes);
+    }
+    notes.add(note);
+    if (speechJobs.has(key) || !api) return;
+    speechJobs.add(key);
+    api(`/api/sessions/${ref.session_id}/turns/${ref.index}/speech`, { method: "POST" })
+      .then(() => {
+        speechReady.add(key);
+        (speechNotes.get(key) || []).forEach((current) => {
+          if (!current.isConnected) return;
+          const player = recordingPlayer(src, 0);
+          if (player) current.replaceWith(player);
+        });
+        speechNotes.delete(key);
+      })
+      .catch((error) => {
+        (speechNotes.get(key) || []).forEach((current) => {
+          if (current.isConnected) current.textContent = error.message || "修正版录音没准备好。";
+        });
+      })
+      .finally(() => speechJobs.delete(key));
   }
 
   function recordingPlayer(src, durationMs) {
@@ -383,6 +514,7 @@
           zh.textContent = asked.zh;
           prompt.appendChild(zh);
         }
+        appendForm(prompt, asked.form);
         if (!retake) prompt.appendChild(draftPanel(open));
         root.appendChild(prompt);
       }
@@ -580,9 +712,14 @@
     back.addEventListener("click", () => {
       if (onBack) onBack();
     });
+    const runs = (page && page.runs) || [];
     const kicker = document.createElement("p");
     kicker.className = "kicker";
-    kicker.textContent = "进展统计";
+    kicker.append(document.createTextNode("进展统计"));
+    const count = document.createElement("span");
+    count.className = "progress-count";
+    count.textContent = String(runs.length);
+    kicker.append(count);
     head.append(back, kicker);
     if ((question.en || "").trim()) {
       const en = document.createElement("p");
@@ -596,7 +733,6 @@
       zh.textContent = question.zh;
       head.appendChild(zh);
     }
-    const runs = (page && page.runs) || [];
     const drawn = chart(runs.filter((item) => item.stats), false);
     if (drawn) head.appendChild(drawn);
     else {
@@ -702,7 +838,8 @@
       const path = retake
         ? `/api/progress/${view.open.id}/answers/${retake}/retake`
         : `/api/progress/${view.open.id}/answers`;
-      view = await api(path, { method: "POST", body: form });
+      await api(path, { method: "POST", body: form });
+      view = await api(`/api/questions/${encodeURIComponent(questionId)}/progress`);
       retake = null;
       setTake(null, 0);
       report("");

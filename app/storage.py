@@ -954,6 +954,46 @@ class SessionStore:
                     best_at = updated
         return best
 
+    def corrected_speech(self, question_id: str, prompt_en: str, *, load: bool = True) -> dict | None:
+        """The practice 修正版 recording for this progress question, when that turn exists."""
+        wanted = str(prompt_en or "").strip()
+        if not wanted:
+            return None
+        session = self.latest_for_question(question_id)
+        if not session:
+            return None
+        session_id = str(session.get("id") or "")
+        if not _ID.match(session_id):
+            return None
+        chosen = None
+        for turn in session.get("turns") or []:
+            if not isinstance(turn, dict):
+                continue
+            prompt = turn.get("prompt") if isinstance(turn.get("prompt"), dict) else {}
+            if str(prompt.get("en") or "").strip() != wanted:
+                continue
+            chosen = turn
+        if chosen is None:
+            return None
+        index = chosen.get("index")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index > 99:
+            return None
+        feedback = chosen.get("feedback") if isinstance(chosen.get("feedback"), dict) else {}
+        natural = str(feedback.get("natural") or "").strip()
+        name = f"turn-{index:02d}-speech.wav"
+        path = self._dir(session_id) / name
+        has_file = bool(_SPEECH.match(name) and path.is_file() and path.stat().st_size > 0)
+        if not has_file and not natural:
+            return None
+        return {
+            "session_id": session_id,
+            "index": index,
+            "mime": str(chosen.get("speech_mime") or "audio/wav"),
+            "has_speech": has_file,
+            "natural": natural,
+            "audio": path.read_bytes() if has_file and load else b"",
+        }
+
     def drop_speech(self, session_id: str, index: int) -> dict:
         with self._lock:
             session = self._read(session_id)

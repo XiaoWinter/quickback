@@ -105,7 +105,7 @@
         statsBtn.type = "button";
         statsBtn.className = "text-btn";
         statsBtn.dataset.progressStats = question.id;
-        statsBtn.textContent = "进展统计";
+        statsBtn.textContent = `进展统计 ${(question.progress || []).length}`;
         const remove = document.createElement("button");
         remove.type = "button";
         remove.className = "text-btn";

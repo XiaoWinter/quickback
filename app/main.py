@@ -216,7 +216,43 @@ def _progress_page(question_id: str) -> dict:
     except QuestionError as exc:
         raise HTTPException(status_code=404, detail="没有这道题。") from exc
     progress.align_prompts(question_id, _practice_prompts(question))
-    return progress.page(question)
+    return _attach_corrected_speech(progress.page(question), question_id)
+
+
+def _attach_corrected_speech(page: dict, question_id: str) -> dict:
+    runs = []
+    open_run = page.get("open")
+    if isinstance(open_run, dict):
+        runs.append(open_run)
+    runs.extend(item for item in (page.get("runs") or []) if isinstance(item, dict))
+    for run in runs:
+        for answer in run.get("answers") or []:
+            if not isinstance(answer, dict):
+                continue
+            own = str(answer.get("natural") or "").strip()
+            if own:
+                number = int(answer.get("number") or 0)
+                has_speech = bool(answer.get("has_corrected"))
+                answer["corrected_speech"] = {
+                    "natural": own,
+                    "natural_zh": str(answer.get("natural_zh") or ""),
+                    "has_speech": has_speech,
+                    "audio_url": f"/api/progress/{run.get('id')}/speech/{number}" if has_speech else "",
+                }
+                continue
+            prompt = answer.get("prompt") if isinstance(answer.get("prompt"), dict) else {}
+            ref = store.corrected_speech(question_id, str(prompt.get("en") or ""), load=False)
+            if not ref:
+                continue
+            has_speech = bool(ref.get("has_speech"))
+            answer["corrected_speech"] = {
+                "session_id": ref["session_id"],
+                "index": ref["index"],
+                "has_speech": has_speech,
+                "natural": str(ref.get("natural") or ""),
+                "audio_url": f"/api/sessions/{ref['session_id']}/speech/{ref['index']}" if has_speech else "",
+            }
+    return page
 
 
 @app.get("/api/questions/{question_id}/progress")
@@ -353,6 +389,15 @@ def progress_discard(run_id: str):
     return _progress_question_page(question_id)
 
 
+@app.get("/api/progress/{run_id}/speech/{number}")
+def progress_corrected(run_id: str, number: int):
+    try:
+        path = progress.corrected_path(run_id, number)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段修正版。") from exc
+    return FileResponse(path, media_type="audio/wav", headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/api/progress/{run_id}/audio/{number}")
 def progress_audio(run_id: str, number: int):
     try:
@@ -386,6 +431,8 @@ async def _score_progress(run_id: str, question_id: str) -> dict:
         if not str(transcript or "").strip():
             progress.fail_pending(run_id, "没听清，再说一次。")
             return _progress_question_page(question_id)
+        ref = store.corrected_speech(ctx["question_id"], ctx["prompt_en"])
+        reference = ref["audio"] if ref and ref.get("has_speech") else None
         parsed = await asyncio.to_thread(
             client.progress_score,
             topic_en=ctx["topic_en"],
@@ -395,8 +442,17 @@ async def _score_progress(run_id: str, question_id: str) -> dict:
             transcript=transcript,
             duration_ms=ctx["duration_ms"],
             earlier=ctx["earlier"],
+            reference=reference,
+            reference_mime=(ref or {}).get("mime") or "audio/wav",
         )
         progress.commit_answer(run_id, transcript, parsed)
+        natural = str(parsed.get("natural") or "").strip()
+        if natural:
+            try:
+                spoken = await asyncio.to_thread(client.speak, natural)
+                progress.save_corrected(run_id, int(ctx["number"]), spoken)
+            except (ModelError, NotFound, StorageError) as exc:
+                log.info("progress %s corrected speech skipped: %s", run_id, exc)
     except ModelError as exc:
         log.info("progress %s failed: %s", run_id, exc)
         try:

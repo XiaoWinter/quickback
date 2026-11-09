@@ -1,3 +1,6 @@
+import re
+
+
 def build_feedback_prompt(
     *,
     topic_en: str,
@@ -216,6 +219,22 @@ A right note: 语块用对了，但 rarely spoke 是过去的习惯，is 是现�
 """
 
 
+_CLOSED_QUESTION = re.compile(
+    r"^(?:do|does|did|are|is|was|were|can|could|will|would|have|has|had|should)\b"
+    r"|^(?:how often|how many|how much|how long|how old|how far|which|when|where|who|whom|whose)\b"
+    r"|^(?:what time|what date|what number|what day)\b",
+    re.IGNORECASE,
+)
+
+
+def question_form(en: str) -> str:
+    """Closed questions want a direct fact. Open questions can take detail and a scene."""
+    text = " ".join(str(en or "").split())
+    if text and _CLOSED_QUESTION.search(text):
+        return "closed"
+    return "open"
+
+
 def build_progress_prompt(
     *,
     topic_en: str,
@@ -225,6 +244,7 @@ def build_progress_prompt(
     transcript: str,
     duration_ms: int | None,
     earlier: list[tuple[str, str]],
+    reference: bool = False,
 ) -> str:
     seconds = max(0, int(duration_ms or 0)) / 1000
     history = ""
@@ -233,6 +253,27 @@ def build_progress_prompt(
         for en, said in earlier[-4:]:
             lines.append(f"Question: {en}\nAnswer: {said}")
         history = "Earlier in this same run:\n" + "\n\n".join(lines) + "\n\n"
+    if question_form(prompt_en) == "closed":
+        content_rule = (
+            "This question is closed: it asks for yes or no, a frequency, a number, a time, or a single choice. "
+            "A direct answer that states the fact is already the top of content. "
+            "Do not lower content because there is no scene, and do not raise it for an extra scene."
+        )
+    else:
+        content_rule = (
+            "This question is open: it asks for a description, a preference, or an experience. "
+            "Content rewards specific detail and a visible scene that answers it. "
+            "A checkable detail scores higher than a bare judgment. A visible action scores higher still. "
+            "The top score needs that scene to answer this question. A list of names does not raise it."
+        )
+    reference_note = ""
+    if reference:
+        reference_note = (
+            "\nA recording of the corrected version for this question is attached after this text. "
+            "It is an earlier practice reading, not this answer. "
+            "Use it only when scoring fluency, along with the transcript and the recording length. "
+            "Do not let it replace points the learner added this time.\n"
+        )
     return f"""Score this spoken answer. The learner may mix English and Chinese.
 Topic: {topic_en}
 Topic in Chinese: {topic_zh}
@@ -241,21 +282,29 @@ This question in Chinese: {prompt_zh}
 Recording length: {seconds:.1f} seconds
 {history}Transcript:
 \"\"\"{transcript}\"\"\"
-
-Give three integer scores from 0 to 100:
+{reference_note}
+Give integer scores from 0 to 100:
 - comprehensibility: a listener can tell what they mean. Chinese mixed in can still score high.
 - relevance: the answer responds to this question, not a different one.
 - fluency: restarts, repetition, and broken phrases in the transcript. Use the recording length too. A fragment that is too short for the question scores lower. Do not grade grammar as its own penalty.
+- content: {content_rule} Do not lower content for restarts, repetition, or grammar.
 
-Each note is one short Simplified Chinese sentence. No praise, no English, no rewritten answer.
+Each note is one short Simplified Chinese sentence about this answer. No praise, no English, no rewritten answer.
+Do not say the answer mixes Chinese unless the transcript itself contains Chinese.
+
+Also return natural and natural_zh.
+natural is the whole answer in English. Keep every point they made, in the same order, including a later sentence. Do not stop after the first sentence. Do not drop a point.
+Copy English that is already fine. Fix only broken grammar and clearly unidiomatic phrases. Do not add facts they did not say. Do not leave Chinese characters in natural.
+natural_zh translates that whole natural line into Simplified Chinese, sentence by sentence.
 
 Also point out concrete mistakes in fixes, at most 3.
 Each item copies a short wrong fragment from the transcript (spoken), gives only that replacement in English (better), and explains that one mistake in one short Simplified Chinese sentence (note).
 Cover grammar, word choice, tense, agreement, articles, and word order.
 Do not invent a mistake. Do not rewrite the whole answer. Do not turn Chinese they used on purpose into an error.
+British and American wording are both acceptable. have got and has got are not mistakes. Do not replace them with have or has. If they restart, only remove the repeated start and keep the wording they settled on.
 If the answer has no such mistake, fixes is [].
-These fixes do not change the three scores.
+These fixes do not change the scores.
 
 Return one JSON object and nothing else:
-{{"comprehensibility": 0, "relevance": 0, "fluency": 0, "comprehensibility_note": "简体中文", "relevance_note": "简体中文", "fluency_note": "简体中文", "fixes": [{{"spoken": "he go", "better": "he went", "note": "讲过去的事，用 went。"}}]}}
+{{"comprehensibility": 0, "relevance": 0, "fluency": 0, "content": 0, "comprehensibility_note": "简体中文", "relevance_note": "简体中文", "fluency_note": "简体中文", "content_note": "简体中文", "natural": "the whole answer in English", "natural_zh": "整句修正版的简体中文", "fixes": [{{"spoken": "he go", "better": "he went", "note": "讲过去的事，用 went。"}}]}}
 """

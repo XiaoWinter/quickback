@@ -421,18 +421,31 @@ def parse_progress_score(text: str, transcript: str = "") -> dict:
     for key in keys:
         note = _clip_zh(zhconv.convert(str(data.get(f"{key}_note") or ""), "zh-cn"), 160)
         notes[key] = note if _ZH.search(note) else ""
+    if data.get("content") not in (None, ""):
+        scores["content"] = score(data.get("content"))
+        content_note = _clip_zh(zhconv.convert(str(data.get("content_note") or ""), "zh-cn"), 160)
+        notes["content"] = content_note if _ZH.search(content_note) else ""
     follow = " ".join(str(data.get("follow_up") or "").split())
     if not re.search(r"[A-Za-z]", follow):
         follow = ""
     follow_zh = _clip_zh(zhconv.convert(str(data.get("follow_up_zh") or ""), "zh-cn"), 160)
     if not _ZH.search(follow_zh):
         follow_zh = ""
+    natural = re.sub(r"[\u3400-\u9fff]+", " ", str(data.get("natural") or ""))
+    natural = " ".join(natural.split())
+    if not re.search(r"[A-Za-z]", natural):
+        natural = ""
+    natural_zh = _clip_zh(zhconv.convert(str(data.get("natural_zh") or ""), "zh-cn"), 800)
+    if not _ZH.search(natural_zh):
+        natural_zh = ""
     return {
         "scores": scores,
         "notes": notes,
         "fixes": _progress_fixes(data.get("fixes"), transcript),
         "follow_up": follow[:240],
         "follow_up_zh": follow_zh,
+        "natural": natural[:800],
+        "natural_zh": natural_zh,
     }
 
 
@@ -769,21 +782,28 @@ class GeminiClient:
         transcript: str,
         duration_ms: int | None,
         earlier: list[tuple[str, str]],
+        reference: bytes | None = None,
+        reference_mime: str = "audio/wav",
     ) -> dict:
         _genai, types = _sdk()
         client = self._client_or_create()
+        prompt = build_progress_prompt(
+            topic_en=topic_en,
+            topic_zh=topic_zh,
+            prompt_en=prompt_en,
+            prompt_zh=prompt_zh,
+            transcript=transcript,
+            duration_ms=duration_ms,
+            earlier=earlier,
+            reference=bool(reference),
+        )
+        contents: list = [prompt]
+        if reference:
+            contents.append(_audio_part(types, reference, reference_mime or "audio/wav"))
         try:
             response = client.models.generate_content(
                 model=self.feedback_model,
-                contents=build_progress_prompt(
-                    topic_en=topic_en,
-                    topic_zh=topic_zh,
-                    prompt_en=prompt_en,
-                    prompt_zh=prompt_zh,
-                    transcript=transcript,
-                    duration_ms=duration_ms,
-                    earlier=earlier,
-                ),
+                contents=contents,
                 config=types.GenerateContentConfig(
                     temperature=0.2,
                     response_mime_type="application/json",

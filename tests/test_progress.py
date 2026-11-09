@@ -5,7 +5,9 @@ from pathlib import Path
 
 from app.gemini_client import ModelError, parse_progress_score
 from app.progress import ProgressStore, summarize, weighted_raw
-from app.storage import StorageError
+from app.prompts import build_progress_prompt, question_form
+from app.qwen_client import QwenClient, progress_content
+from app.storage import SessionStore, StorageError
 
 
 def _scores(comp, rel, flu):
@@ -24,6 +26,7 @@ def _scores(comp, rel, flu):
 class ScoreTests(unittest.TestCase):
     def test_weights(self):
         self.assertEqual(weighted_raw(80, 70, 60), 71)
+        self.assertEqual(weighted_raw(80, 70, 60, 100), 80)
 
     def test_summary_ignores_follow_up_bonus(self):
         answers = [
@@ -60,6 +63,39 @@ class ScoreTests(unittest.TestCase):
         self.assertEqual(data["notes"]["relevance"], "")
         self.assertEqual(data["follow_up"], "What happened next?")
         self.assertIn("后来", data["follow_up_zh"])
+
+    def test_parse_keeps_every_sentence_of_the_corrected_answer(self):
+        said = "They love hay. And when I open the fridge, they squeak."
+        data = parse_progress_score(
+            """
+            {
+              "comprehensibility": 90,
+              "relevance": 90,
+              "fluency": 80,
+              "natural": "They love hay. And when I open the fridge, they squeak.",
+              "natural_zh": "它们喜欢干草。我打开冰箱时，它们会叫。"
+            }
+            """,
+            said,
+        )
+        self.assertIn("fridge", data["natural"])
+        self.assertIn("冰箱", data["natural_zh"])
+
+    def test_parse_keeps_a_content_score_apart_from_fluency(self):
+        data = parse_progress_score(
+            """
+            {
+              "comprehensibility": 80,
+              "relevance": 80,
+              "fluency": 50,
+              "content": 100,
+              "content_note": "有一个能看见的场面，而且贴题。"
+            }
+            """
+        )
+        self.assertEqual(data["scores"]["content"], 100)
+        self.assertIn("场面", data["notes"]["content"])
+        self.assertEqual(data["scores"]["fluency"], 50)
 
     def test_parse_drops_a_follow_up_that_is_not_english(self):
         data = parse_progress_score(
@@ -272,6 +308,132 @@ class StoreTests(unittest.TestCase):
             )
             again = ProgressStore(Path(tmp)).page(question)
             self.assertIsNone(again["open"]["answers"][0]["fixes"])
+
+    def test_corrected_line_keeps_the_later_sentence_and_its_audio(self):
+        question = {"id": "animals", "en": "What animals do you like?", "zh": "你喜欢什么动物？"}
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ProgressStore(Path(tmp))
+            opened = store.open_run(question)
+            store.save_pending(opened["id"], b"x" * 500, "audio/webm", 4000)
+            parsed = _scores(80, 80, 80)
+            parsed["natural"] = "They love hay. They squeak when I open the fridge."
+            parsed["natural_zh"] = "它们喜欢干草。我打开冰箱时它们会叫。"
+            store.commit_answer(opened["id"], "They love hay. They squeak.", parsed)
+            store.save_corrected(opened["id"], 1, b"RIFFdemo")
+            page = store.page(question)["open"]["answers"][0]
+            self.assertIn("fridge", page["natural"])
+            self.assertTrue(page["has_corrected"])
+            self.assertTrue(store.corrected_path(opened["id"], 1).is_file())
+
+
+class CorrectedSpeechTests(unittest.TestCase):
+    def _prompt(self, **extra):
+        fields = dict(
+            topic_en="animals",
+            topic_zh="动物",
+            prompt_en="What animals do you like?",
+            prompt_zh="你喜欢什么动物？",
+            transcript="I like cats.",
+            duration_ms=4000,
+            earlier=[],
+        )
+        fields.update(extra)
+        return build_progress_prompt(**fields)
+
+    def test_prompt_mentions_the_corrected_recording_only_when_attached(self):
+        attached = self._prompt(reference=True)
+        plain = self._prompt()
+        self.assertIn("corrected version", attached)
+        self.assertNotIn("corrected version", plain)
+        self.assertIn("Do not drop a point", plain)
+        self.assertIn("This question is open", plain)
+        closed = self._prompt(prompt_en="Do you give them fresh hay every day?", prompt_zh="你每天都会给它们新鲜的干草吗？")
+        self.assertIn("This question is closed", closed)
+        self.assertNotIn("visible scene", closed)
+
+    def test_question_form_keeps_a_direct_question_closed(self):
+        self.assertEqual(question_form("Do you give them fresh hay every day?"), "closed")
+        self.assertEqual(question_form("How often do you check on the hay supply?"), "closed")
+        self.assertEqual(question_form("what animals do you like?"), "open")
+        self.assertEqual(question_form("What do your guinea pigs like to eat the most?"), "open")
+
+    def test_qwen_content_keeps_the_wav_beside_the_prompt(self):
+        content = progress_content("score this", b"RIFF", "audio/wav")
+        self.assertEqual(content[0]["text"], "score this")
+        self.assertEqual(content[1]["type"], "input_audio")
+        self.assertTrue(content[1]["input_audio"]["data"].startswith("data:audio/wav;base64,"))
+        self.assertEqual(progress_content("score this", None, "audio/wav"), "score this")
+
+    def test_qwen_retries_without_audio_when_the_model_refuses_it(self):
+        score = (
+            '{"comprehensibility": 80, "relevance": 80, "fluency": 80, '
+            '"comprehensibility_note": "听得懂。", "relevance_note": "答到了。", "fluency_note": "顺。", "fixes": []}'
+        )
+
+        class Stub(QwenClient):
+            def __init__(self):
+                super().__init__("k", "qwen-flash", "asr", "tts", "Cherry", "https://example.invalid")
+                self.calls = []
+
+            def _post(self, url, payload):
+                content = payload["messages"][0]["content"]
+                self.calls.append(content if isinstance(content, str) else "audio")
+                if not isinstance(content, str):
+                    raise ModelError("千问没有接受这次请求。录音已留下，可以点重试。")
+                return {"choices": [{"message": {"content": score}}]}
+
+        client = Stub()
+        parsed = client.progress_score(
+            topic_en="animals",
+            topic_zh="动物",
+            prompt_en="What animals do you like?",
+            prompt_zh="你喜欢什么动物？",
+            transcript="I like cats.",
+            duration_ms=4000,
+            earlier=[],
+            reference=b"RIFF",
+            reference_mime="audio/wav",
+        )
+        self.assertEqual(client.calls[0], "audio")
+        self.assertIn("Transcript", client.calls[1])
+        self.assertNotIn("corrected version", client.calls[1])
+        self.assertEqual(parsed["scores"]["fluency"], 80)
+        self.assertTrue(client._skip_progress_audio)
+
+    def test_lookup_uses_the_matching_practice_turn(self):
+        session_id = "a" * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / session_id
+            folder.mkdir()
+            (folder / "turn-01-speech.wav").write_bytes(b"RIFF")
+            (folder / "session.json").write_text(
+                json.dumps(
+                    {
+                        "id": session_id,
+                        "updated_at": "2026-11-08T00:00:00",
+                        "question": {"id": "animals"},
+                        "turns": [
+                            {
+                                "index": 1,
+                                "prompt": {"en": "What animals do you like?", "zh": "你喜欢什么动物？"},
+                                "speech_file": "turn-01-speech.wav",
+                                "speech_mime": "audio/wav",
+                                "feedback": {"natural": "I like guinea pigs."},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            found = SessionStore(root).corrected_speech("animals", "What animals do you like?")
+            self.assertEqual(found["session_id"], session_id)
+            self.assertEqual(found["index"], 1)
+            self.assertTrue(found["has_speech"])
+            self.assertEqual(found["audio"], b"RIFF")
+            skipped = SessionStore(root).corrected_speech("animals", "What animals do you like?", load=False)
+            self.assertEqual(skipped["audio"], b"")
+            self.assertIsNone(SessionStore(root).corrected_speech("animals", "Something else?"))
 
 
 if __name__ == "__main__":

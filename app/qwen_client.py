@@ -67,6 +67,24 @@ def contains_cjk(text: str) -> bool:
     return any("\u3400" <= char <= "\u9fff" for char in text or "")
 
 
+def progress_content(prompt: str, reference: bytes | None, mime: str) -> str | list:
+    """Text prompt, plus the corrected-version recording when the scoring call can carry it."""
+    if not reference:
+        return prompt
+    encoded = base64.b64encode(reference).decode("ascii")
+    if len(encoded) > _MAX_AUDIO_B64:
+        return prompt
+    kind = (mime or "audio/wav").split(";", 1)[0].strip() or "audio/wav"
+    audio_format = "wav" if kind in {"audio/wav", "audio/wave", "audio/x-wav"} else (kind.split("/")[-1] or "wav")
+    return [
+        {"type": "text", "text": prompt},
+        {
+            "type": "input_audio",
+            "input_audio": {"data": f"data:{kind};base64,{encoded}", "format": audio_format},
+        },
+    ]
+
+
 def usable_audio_url(url: str) -> str:
     parsed = urlparse((url or "").strip())
     host = (parsed.hostname or "").lower()
@@ -101,6 +119,7 @@ class QwenClient:
         self.tts_model = tts_model
         self.tts_voice = tts_voice
         self.base_url = base_url.rstrip("/")
+        self._skip_progress_audio = False
 
     def transcribe(self, data: bytes, mime: str) -> str:
         encoded = base64.b64encode(data).decode("ascii")
@@ -276,7 +295,76 @@ class QwenClient:
         transcript: str,
         duration_ms: int | None,
         earlier: list[tuple[str, str]],
+        reference: bytes | None = None,
+        reference_mime: str = "audio/wav",
     ) -> dict:
+        audio = None if self._skip_progress_audio else (reference or None)
+        try:
+            text = self._progress_text(
+                topic_en=topic_en,
+                topic_zh=topic_zh,
+                prompt_en=prompt_en,
+                prompt_zh=prompt_zh,
+                transcript=transcript,
+                duration_ms=duration_ms,
+                earlier=earlier,
+                reference=audio,
+                reference_mime=reference_mime,
+            )
+        except ModelError as exc:
+            if not audio or "没有接受" not in str(exc):
+                raise
+            self._skip_progress_audio = True
+            text = self._progress_text(
+                topic_en=topic_en,
+                topic_zh=topic_zh,
+                prompt_en=prompt_en,
+                prompt_zh=prompt_zh,
+                transcript=transcript,
+                duration_ms=duration_ms,
+                earlier=earlier,
+                reference=None,
+                reference_mime=reference_mime,
+            )
+        return parse_progress_score(text, transcript)
+
+    def _progress_text(
+        self,
+        *,
+        topic_en: str,
+        topic_zh: str,
+        prompt_en: str,
+        prompt_zh: str,
+        transcript: str,
+        duration_ms: int | None,
+        earlier: list[tuple[str, str]],
+        reference: bytes | None,
+        reference_mime: str,
+    ) -> str:
+        attached = bool(reference)
+        prompt = build_progress_prompt(
+            topic_en=topic_en,
+            topic_zh=topic_zh,
+            prompt_en=prompt_en,
+            prompt_zh=prompt_zh,
+            transcript=transcript,
+            duration_ms=duration_ms,
+            earlier=earlier,
+            reference=attached,
+        )
+        content = progress_content(prompt, reference, reference_mime)
+        if attached and isinstance(content, str):
+            prompt = build_progress_prompt(
+                topic_en=topic_en,
+                topic_zh=topic_zh,
+                prompt_en=prompt_en,
+                prompt_zh=prompt_zh,
+                transcript=transcript,
+                duration_ms=duration_ms,
+                earlier=earlier,
+                reference=False,
+            )
+            content = prompt
         payload = self._post(
             chat_url(self.base_url),
             {
@@ -284,27 +372,13 @@ class QwenClient:
                 "temperature": 0.2,
                 "enable_thinking": False,
                 "response_format": {"type": "json_object"},
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": build_progress_prompt(
-                            topic_en=topic_en,
-                            topic_zh=topic_zh,
-                            prompt_en=prompt_en,
-                            prompt_zh=prompt_zh,
-                            transcript=transcript,
-                            duration_ms=duration_ms,
-                            earlier=earlier,
-                        ),
-                    }
-                ],
+                "messages": [{"role": "user", "content": content}],
             },
         )
         choices = payload.get("choices") or []
-        text = ""
-        if choices:
-            text = str(((choices[0] or {}).get("message") or {}).get("content") or "").strip()
-        return parse_progress_score(text, transcript)
+        if not choices:
+            return ""
+        return str(((choices[0] or {}).get("message") or {}).get("content") or "").strip()
 
     def _translate_leftover_chinese(self, parsed: dict, transcript: str) -> dict | None:
         payload = self._post(
