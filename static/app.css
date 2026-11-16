@@ -102,9 +102,11 @@ h1 {
 }
 
 .tab {
+  display: inline-block;
   padding: 0.4rem 0.75rem;
   border-radius: 999px;
   color: var(--muted);
+  text-decoration: none;
 }
 
 .tab.is-active {

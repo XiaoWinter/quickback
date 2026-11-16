@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Quickback</title>
-    <link rel="stylesheet" href="/static/app.css?v=81">
+    <link rel="stylesheet" href="/static/app.css?v=82">
 </head>
 <body>
   <div class="page">
@@ -20,10 +20,10 @@
             <option value="qwen">千问</option>
           </select>
         </label>
-        <button type="button" id="tab-practice" class="tab is-active">练习</button>
-        <button type="button" id="tab-history" class="tab">记录</button>
-        <button type="button" id="tab-questions" class="tab">题目</button>
-        <button type="button" id="tab-progress" class="tab">进展</button>
+        <a href="/practice" id="tab-practice" class="tab is-active" aria-current="page">练习</a>
+        <a href="/history" id="tab-history" class="tab">记录</a>
+        <a href="/questions" id="tab-questions" class="tab">题目</a>
+        <a href="/progress" id="tab-progress" class="tab">进展</a>
       </nav>
     </header>
 
@@ -91,6 +91,6 @@
   <script src="/static/chart.umd.min.js?v=4.4.6"></script>
   <script src="/static/progress.js?v=30"></script>
   <script src="/static/questions.js?v=39"></script>
-  <script src="/static/app.js?v=68"></script>
+  <script src="/static/app.js?v=69"></script>
 </body>
 </html>

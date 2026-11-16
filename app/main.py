@@ -108,9 +108,28 @@ def _blank(value: str | None) -> str | None:
     return value or None
 
 
+_PAGES = {"practice", "history", "questions", "progress"}
+
+
+def _page():
+    return FileResponse(ROOT / "static" / "index.html", headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "static" / "index.html", headers={"Cache-Control": "no-cache"})
+    return _page()
+
+
+@app.get("/progress/stats")
+def progress_stats_page():
+    return _page()
+
+
+@app.get("/{page}")
+def app_page(page: str):
+    if page not in _PAGES:
+        raise HTTPException(status_code=404)
+    return _page()
 
 
 @app.get("/api/cert")

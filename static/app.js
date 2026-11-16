@@ -1256,6 +1256,54 @@ async function finishPractice() {
   }
 }
 
+let applyingRoute = false;
+
+function pagePath(name, question) {
+  const paths = {
+    practice: "/practice",
+    history: "/history",
+    questions: "/questions",
+    progress: "/progress",
+    "progress-stats": "/progress/stats",
+  };
+  const path = paths[name] || "/practice";
+  if ((name === "progress" || name === "progress-stats") && question) {
+    return `${path}?question=${encodeURIComponent(question)}`;
+  }
+  return path;
+}
+
+function routeFromLocation() {
+  const path = location.pathname.replace(/\/+$/, "") || "/";
+  const question = new URLSearchParams(location.search).get("question") || "";
+  if (path === "/history") return { name: "history", question: "" };
+  if (path === "/questions") return { name: "questions", question: "" };
+  if (path === "/progress/stats") return { name: "progress-stats", question };
+  if (path === "/progress") return { name: "progress", question };
+  return { name: "practice", question: "" };
+}
+
+function rememberRoute(name, question) {
+  if (applyingRoute) return;
+  const url = pagePath(name, question || "");
+  const state = { name, question: question || "" };
+  if (location.pathname + location.search === url) history.replaceState(state, "", url);
+  else history.pushState(state, "", url);
+  if (name === "progress" || name === "progress-stats") syncProgressHref(question || "");
+}
+
+function syncProgressHref(question) {
+  const link = document.getElementById("tab-progress");
+  if (!link) return;
+  link.href = question ? `/progress?question=${encodeURIComponent(question)}` : "/progress";
+}
+
+function followLink(event) {
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return false;
+  event.preventDefault();
+  return true;
+}
+
 function activate(tab) {
   if (tab !== "progress" && window.QuickbackProgress) window.QuickbackProgress.leave();
   practiceEl.hidden = tab !== "practice";
@@ -1265,17 +1313,24 @@ function activate(tab) {
   if (progressEl) progressEl.hidden = tab !== "progress";
   const statsEl = document.getElementById("progress-stats");
   if (statsEl) statsEl.hidden = tab !== "progress-stats";
+  const activeTab = tab === "progress-stats" ? "progress" : tab;
   ["practice", "history", "questions", "progress"].forEach((name) => {
     const tabButton = document.getElementById(`tab-${name}`);
-    if (tabButton) tabButton.classList.toggle("is-active", name === tab);
+    if (!tabButton) return;
+    const on = name === activeTab;
+    tabButton.classList.toggle("is-active", on);
+    if (on) tabButton.setAttribute("aria-current", "page");
+    else tabButton.removeAttribute("aria-current");
   });
 }
 
 function showPractice() {
+  rememberRoute("practice");
   activate("practice");
 }
 
 async function showHistory() {
+  rememberRoute("history");
   activate("history");
   const list = document.getElementById("history-list");
   list.replaceChildren();
@@ -1939,6 +1994,7 @@ async function answerQuestion(id) {
 }
 
 async function openProgressStats(questionId) {
+  rememberRoute("progress-stats", questionId || "");
   activate("progress-stats");
   window.scrollTo(0, 0);
   try {
@@ -1949,6 +2005,7 @@ async function openProgressStats(questionId) {
 }
 
 async function openProgress(questionId) {
+  rememberRoute("progress", questionId || "");
   activate("progress");
   window.scrollTo(0, 0);
   try {
@@ -1959,6 +2016,7 @@ async function openProgress(questionId) {
 }
 
 async function showQuestions() {
+  rememberRoute("questions");
   activate("questions");
   try {
     await window.QuickbackQuestions.show(api, showBanner, answerQuestion, dropQuestion, openProgress, openProgressStats);
@@ -1968,12 +2026,23 @@ async function showQuestions() {
   }
 }
 
-document.getElementById("tab-practice").addEventListener("click", showPractice);
-document.getElementById("tab-history").addEventListener("click", showHistory);
-document.getElementById("tab-questions").addEventListener("click", showQuestions);
-document.getElementById("tab-progress").addEventListener("click", () => {
-  const current = window.QuickbackProgress ? window.QuickbackProgress.questionId() : "";
-  openProgress(current);
+document.getElementById("tab-practice").addEventListener("click", (event) => {
+  if (followLink(event)) showPractice();
+});
+document.getElementById("tab-history").addEventListener("click", (event) => {
+  if (followLink(event)) showHistory();
+});
+document.getElementById("tab-questions").addEventListener("click", (event) => {
+  if (followLink(event)) showQuestions();
+});
+document.getElementById("tab-progress").addEventListener("click", (event) => {
+  if (!followLink(event)) return;
+  const route = routeFromLocation();
+  const onProgress = route.name === "progress" || route.name === "progress-stats";
+  const current = onProgress && route.question
+    ? route.question
+    : (window.QuickbackProgress ? window.QuickbackProgress.questionId() : "");
+  openProgress(current || "");
 });
 
 turnsEl.addEventListener("click", (event) => {
@@ -2074,6 +2143,25 @@ function showProvider(view) {
   if (!view.has_key) showBanner(missingKeyMessage(view.provider));
 }
 
+async function applyRoute() {
+  const route = routeFromLocation();
+  const url = pagePath(route.name, route.question);
+  if (location.pathname + location.search !== url) {
+    history.replaceState({ name: route.name, question: route.question }, "", url);
+  }
+  if (route.name === "progress" || route.name === "progress-stats") syncProgressHref(route.question);
+  applyingRoute = true;
+  try {
+    if (route.name === "history") await showHistory();
+    else if (route.name === "questions") await showQuestions();
+    else if (route.name === "progress") await openProgress(route.question);
+    else if (route.name === "progress-stats") await openProgressStats(route.question);
+    else showPractice();
+  } finally {
+    applyingRoute = false;
+  }
+}
+
 async function init() {
   try {
     showProvider(await api("/api/provider"));
@@ -2082,6 +2170,10 @@ async function init() {
   }
   renderPractice();
   restorePractice();
+  window.addEventListener("popstate", () => {
+    applyRoute();
+  });
+  applyRoute();
 }
 
 providerSelect.addEventListener("change", async () => {

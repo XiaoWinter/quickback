@@ -1,5 +1,75 @@
 [
   {
+    "id": "should-everyone-take-some-sort-of-furthe",
+    "en": "Should everyone take some sort of further education?",
+    "zh": "每个人都应该接受某种形式的进一步教育吗？",
+    "created_at": "2026-11-11T07:37:42-08:00",
+    "updated_at": "2026-11-11T07:37:42-08:00"
+  },
+  {
+    "id": "don-t-we-do-enough-to-protecet-the-envir",
+    "en": "Don't we do enough to protecet the environment?",
+    "zh": "我们在保护环境方面做得还不够吗？",
+    "created_at": "2026-11-11T07:36:48-08:00",
+    "updated_at": "2026-11-11T07:36:48-08:00"
+  },
+  {
+    "id": "will-robots-play-a-more-important-role-i",
+    "en": "Will robots play a more important role in our lives in the future.",
+    "zh": "机器人会在未来的生活中扮演更重要的角色吗？",
+    "created_at": "2026-11-11T07:35:48-08:00",
+    "updated_at": "2026-11-11T07:35:48-08:00"
+  },
+  {
+    "id": "should-people-be-made-to-retire-earlier",
+    "en": "Should people be made to retire earlier so that younger people have a better chance of getting a job?",
+    "zh": "是否应该让人们提前退休，以便年轻人有更好的机会找到工作？",
+    "created_at": "2026-11-11T07:34:46-08:00",
+    "updated_at": "2026-11-11T07:34:46-08:00"
+  },
+  {
+    "id": "are-vedio-games-in-general-a-lot-more-vi",
+    "en": "Are vedio games in general a lot more violent nowadays?",
+    "zh": "现在的电子游戏是否更加暴力？",
+    "created_at": "2026-11-11T07:32:54-08:00",
+    "updated_at": "2026-11-11T07:32:54-08:00"
+  },
+  {
+    "id": "do-you-think-newspapers-and-books-will-e",
+    "en": "Do you think newspapers and books will eventually disappear?",
+    "zh": "报纸和书籍最终会消失吗？",
+    "created_at": "2026-11-11T07:22:33-08:00",
+    "updated_at": "2026-11-11T07:22:33-08:00"
+  },
+  {
+    "id": "pollution-is-a-problem-in-many-countries",
+    "en": "Pollution is a problem in many countries. What do you think government can do about it?",
+    "zh": "污染在很多国家都是问题。关于污染政府能做什么？",
+    "created_at": "2026-11-11T07:21:21-08:00",
+    "updated_at": "2026-11-11T07:21:21-08:00"
+  },
+  {
+    "id": "do-you-think-the-government-should-try-t",
+    "en": "Do you think the government should try to control the internet, or should people be able to write whatever they want?",
+    "zh": "政府应该去控制互联网的言论，还是人们可以想说什么就说什么?",
+    "created_at": "2026-11-11T07:19:52-08:00",
+    "updated_at": "2026-11-11T07:19:52-08:00"
+  },
+  {
+    "id": "do-you-think-some-peope-spend-too-much-t",
+    "en": "Do you think some peope spend too much time on their computers these days?",
+    "zh": "今天人们花了太多时间在电脑前吗？",
+    "created_at": "2026-11-11T07:17:44-08:00",
+    "updated_at": "2026-11-11T07:17:44-08:00"
+  },
+  {
+    "id": "do-you-think-it-s-important-to-earn-a-la",
+    "en": "Do you think  it's important to earn a large salary or to be happy in your job?",
+    "zh": "你认为是挣钱重要还是开心重要？",
+    "created_at": "2026-11-11T07:16:18-08:00",
+    "updated_at": "2026-11-16T02:46:01-08:00"
+  },
+  {
     "id": "describe-a-time-when-you-helped-someone",
     "en": "describe a time when you helped someone.(follow STAR)",
     "zh": "描述一次你帮助某人的经历.(遵照 STAR 法则)",
