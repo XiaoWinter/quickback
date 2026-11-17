@@ -426,7 +426,8 @@
 
   function recordingPlayer(src, durationMs) {
     if (!window.QuickbackPlayer) return null;
-    return window.QuickbackPlayer.create(src, "metadata", (durationMs || 0) / 1000);
+    const playable = window.QuickbackPlayer.compatibleSrc ? window.QuickbackPlayer.compatibleSrc(src) : src;
+    return window.QuickbackPlayer.create(playable, "metadata", (durationMs || 0) / 1000);
   }
 
   function button(label, action, className) {

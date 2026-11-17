@@ -292,10 +292,37 @@ function forgetSessionSpeech(sessionId) {
   }
 }
 
+function canPlayWebm() {
+  if (canPlayWebm.cached != null) return canPlayWebm.cached;
+  const probe = document.createElement("audio");
+  canPlayWebm.cached = Boolean(probe.canPlayType && probe.canPlayType("audio/webm"));
+  return canPlayWebm.cached;
+}
+
+function compatibleSrc(src) {
+  if (!src || canPlayWebm() || /[?&]compat=/.test(src)) return src;
+  return `${src}${src.includes("?") ? "&" : "?"}compat=m4a`;
+}
+
+function mediaFile(kind, turn, level) {
+  const feedback = turn.feedback || {};
+  if (kind === "audio") return turn.audio_file || "";
+  if (kind === "speech") {
+    if (!level) return turn.speech_file || "";
+    const item = (feedback.variants || []).find((entry) => entry.key === level);
+    return (item && item.speech_file) || "";
+  }
+  if (!level) return turn.retell_file || "";
+  const item = (feedback.variants || []).find((entry) => entry.key === level);
+  return (item && item.retell_file) || "";
+}
+
 function mediaSrc(kind, turn, level) {
-  const version = encodeURIComponent(turn.created_at || "");
+  const file = mediaFile(kind, turn, level);
+  const version = encodeURIComponent(file || turn.created_at || "");
   const tail = level ? `/${level}` : "";
-  return `/api/sessions/${state.session.id}/${kind}/${turn.index}${tail}?v=${version}`;
+  const url = `/api/sessions/${state.session.id}/${kind}/${turn.index}${tail}?v=${version}`;
+  return kind === "speech" ? url : compatibleSrc(url);
 }
 
 function clock(seconds) {
@@ -336,7 +363,8 @@ const chunkRetell = {
 window.QuickbackChunkRetell = chunkRetell;
 
 function mountPlayer(bar, src, preload, durationHint) {
-  const hint = Number(durationHint) > 0 ? Number(durationHint) : 0;
+  let hint = Number(durationHint) > 0 ? Number(durationHint) : 0;
+  let recovering = false;
   const audio = document.createElement("audio");
   audio.preload = preload || "metadata";
   const play = document.createElement("button");
@@ -357,26 +385,56 @@ function mountPlayer(bar, src, preload, durationHint) {
   bar.classList.add("player");
   bar.replaceChildren(audio, play, range, time);
 
-  const usableDuration = () => {
+  const liveDuration = () => {
     const live = audio.duration;
-    if (Number.isFinite(live) && live > 0) return live;
-    return hint;
+    return Number.isFinite(live) && live > 0 ? live : 0;
   };
+  const position = () => {
+    const now = audio.currentTime || 0;
+    return now > 1e6 ? 0 : now;
+  };
+  const usableDuration = () => liveDuration() || hint;
   const paint = () => {
     const duration = usableDuration();
+    const now = position();
     const nextMax = duration ? String(duration) : "0";
     if (range.max !== nextMax) range.max = nextMax;
     if (duration && document.activeElement !== range) {
-      range.value = String(Math.min(audio.currentTime || 0, duration));
+      range.value = String(Math.min(now, duration));
     }
-    time.textContent = duration
-      ? `${clock(audio.currentTime)} / ${clock(duration)}`
-      : clock(audio.currentTime);
+    time.textContent = `${clock(now)} / ${clock(duration)}`;
+  };
+  const recoverDuration = () => {
+    if (liveDuration() || recovering || !audio.src || audio.error) {
+      paint();
+      return;
+    }
+    recovering = true;
+    const done = () => {
+      const found = liveDuration();
+      if (!found) return;
+      audio.removeEventListener("timeupdate", done);
+      audio.removeEventListener("durationchange", done);
+      recovering = false;
+      if (hint < found) hint = found;
+      if (audio.paused) audio.currentTime = 0;
+      paint();
+    };
+    audio.addEventListener("timeupdate", done);
+    audio.addEventListener("durationchange", done);
+    try {
+      audio.currentTime = 1e101;
+    } catch (_) {
+      recovering = false;
+    }
   };
   const setSrc = (url) => {
+    recovering = false;
     audio.pause();
-    if (url) audio.src = url;
-    else {
+    if (url) {
+      audio.src = url;
+      audio.load();
+    } else {
       audio.removeAttribute("src");
       audio.load();
     }
@@ -397,9 +455,12 @@ function mountPlayer(bar, src, preload, durationHint) {
     });
     audio.play().catch(() => {});
   });
+  audio.addEventListener("error", () => {
+    time.textContent = "播不了";
+  });
   audio.addEventListener("play", () => setPlayIcon(play, true));
   audio.addEventListener("pause", () => setPlayIcon(play, false));
-  audio.addEventListener("loadedmetadata", paint);
+  audio.addEventListener("loadedmetadata", recoverDuration);
   audio.addEventListener("durationchange", paint);
   audio.addEventListener("timeupdate", paint);
   range.addEventListener("input", () => {
@@ -421,6 +482,7 @@ window.QuickbackPlayer = {
   create(src, preload, durationHint) {
     return mountPlayer(document.createElement("div"), src, preload, durationHint);
   },
+  compatibleSrc,
 };
 
 function renderSpeech(parent, turn, options) {
@@ -680,7 +742,8 @@ function renderEcho(parent, turn, level) {
     }
   }
   if (file) {
-    const bar = window.QuickbackPlayer.create(mediaSrc("retell", turn, level), "metadata");
+    const seconds = ((level ? item.retell_duration_ms : turn.retell_duration_ms) || 0) / 1000;
+    const bar = window.QuickbackPlayer.create(mediaSrc("retell", turn, level), "metadata", seconds);
     bar.classList.add("is-retell");
     echo.appendChild(bar);
   }
@@ -857,9 +920,10 @@ function chunkSpeakButton(turn, level, text, slot) {
 }
 
 function chunkMedia(turn, level, number) {
-  const version = encodeURIComponent(turn.created_at || "");
+  const chunk = chunkList(turn, level)[number] || {};
+  const version = encodeURIComponent(chunk.retell_file || turn.created_at || "");
   const scope = level || "main";
-  return `/api/sessions/${state.session.id}/retell/${turn.index}/${scope}/chunks/${number}?v=${version}`;
+  return compatibleSrc(`/api/sessions/${state.session.id}/retell/${turn.index}/${scope}/chunks/${number}?v=${version}`);
 }
 
 function renderChunkEcho(parent, turn, level) {
@@ -1543,7 +1607,7 @@ async function startRecording(retellIndex, retellLevel, retellChunk, sessionId, 
       return;
     }
     if (echo != null) {
-      uploadRetell(echo.index, echo.level || "", echo.chunk || "", blob, echo.sessionId);
+      uploadRetell(echo.index, echo.level || "", echo.chunk || "", blob, echo.sessionId, durationMs);
       return;
     }
     holdTake(blob, durationMs);
@@ -1625,12 +1689,13 @@ async function uploadDrill(index, level, number, slot, blob) {
   }
 }
 
-async function uploadRetell(index, level, chunk, blob, sessionId) {
+async function uploadRetell(index, level, chunk, blob, sessionId, durationMs) {
   const id = sessionId || (state.session && state.session.id);
   if (!id) return;
   const form = new FormData();
   form.append("audio", blob, "retell.webm");
   form.append("mime_type", blob.type || "audio/webm");
+  form.append("duration_ms", String(durationMs || 0));
   state.busy = true;
   syncControls();
   const path = chunk !== "" && chunk != null

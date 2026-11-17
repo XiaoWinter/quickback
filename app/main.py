@@ -2,9 +2,11 @@ import logging
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
+from app.playback import for_client
 
 from app.config import ROOT, settings
 from app.gemini_client import GeminiClient, ModelError, core_was_used
@@ -31,6 +33,16 @@ MAX_AUDIO_BYTES = 12 * 1024 * 1024
 MIN_AUDIO_BYTES = 400
 _speech_locks: dict[tuple[str, int], object] = {}
 _speech_lock_guard = threading.Lock()
+
+
+def _playable(path: Path, mime: str, request: Request) -> FileResponse:
+    served, media_type = for_client(
+        path,
+        mime,
+        request.headers.get("user-agent", ""),
+        request.query_params.get("compat", ""),
+    )
+    return FileResponse(served, media_type=media_type, headers={"Cache-Control": "no-cache"})
 
 
 def _turn_speech_lock(session_id: str, index: int, level: str = ""):
@@ -418,12 +430,12 @@ def progress_corrected(run_id: str, number: int):
 
 
 @app.get("/api/progress/{run_id}/audio/{number}")
-def progress_audio(run_id: str, number: int):
+def progress_audio(run_id: str, number: int, request: Request):
     try:
         path, mime = progress.audio_path(run_id, number)
     except NotFound as exc:
         raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
-    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
+    return _playable(path, mime, request)
 
 
 async def _score_progress(run_id: str, question_id: str) -> dict:
@@ -836,6 +848,7 @@ async def save_retell(
     index: int,
     audio: UploadFile = File(...),
     mime_type: str | None = Form(None),
+    duration_ms: int | None = Form(None),
 ):
     data = await audio.read()
     if len(data) < MIN_AUDIO_BYTES:
@@ -844,7 +857,7 @@ async def save_retell(
         raise HTTPException(status_code=400, detail="这段录音太长了，控制在 3 分钟内。")
     mime = normalize_mime(mime_type or audio.content_type)
     try:
-        return store.save_retell(session_id, index, data, mime)
+        return store.save_retell(session_id, index, data, mime, duration_ms)
     except NotFound as exc:
         raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
     except StorageError as exc:
@@ -889,14 +902,14 @@ def delete_chunk_retell(session_id: str, index: int, scope: str, number: int):
 
 
 @app.get("/api/sessions/{session_id}/retell/{index}/{scope}/chunks/{number}")
-def get_chunk_retell(session_id: str, index: int, scope: str, number: int):
+def get_chunk_retell(session_id: str, index: int, scope: str, number: int, request: Request):
     try:
         path, mime = store.chunk_retell_path(session_id, index, scope, number)
     except NotFound as exc:
         raise HTTPException(status_code=404, detail="还没有这段跟读。") from exc
     except StorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
+    return _playable(path, mime, request)
 
 
 @app.post("/api/sessions/{session_id}/turns/{index}/retell/{level}")
@@ -906,6 +919,7 @@ async def save_variant_retell(
     level: str,
     audio: UploadFile = File(...),
     mime_type: str | None = Form(None),
+    duration_ms: int | None = Form(None),
 ):
     data = await audio.read()
     if len(data) < MIN_AUDIO_BYTES:
@@ -914,7 +928,7 @@ async def save_variant_retell(
         raise HTTPException(status_code=400, detail="这段录音太长了，控制在 3 分钟内。")
     mime = normalize_mime(mime_type or audio.content_type)
     try:
-        return store.save_variant_retell(session_id, index, level, data, mime)
+        return store.save_variant_retell(session_id, index, level, data, mime, duration_ms)
     except NotFound as exc:
         raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
     except StorageError as exc:
@@ -932,14 +946,14 @@ def delete_variant_retell(session_id: str, index: int, level: str):
 
 
 @app.get("/api/sessions/{session_id}/retell/{index}/{level}")
-def get_variant_retell(session_id: str, index: int, level: str):
+def get_variant_retell(session_id: str, index: int, level: str, request: Request):
     try:
         path, mime = store.variant_retell_path(session_id, index, level)
     except NotFound as exc:
         raise HTTPException(status_code=404, detail="还没有这段跟读。") from exc
     except StorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
+    return _playable(path, mime, request)
 
 
 @app.delete("/api/sessions/{session_id}/turns/{index}/retell")
@@ -951,12 +965,12 @@ def delete_retell(session_id: str, index: int):
 
 
 @app.get("/api/sessions/{session_id}/retell/{index}")
-def get_retell(session_id: str, index: int):
+def get_retell(session_id: str, index: int, request: Request):
     try:
         path, mime = store.retell_path(session_id, index)
     except NotFound as exc:
         raise HTTPException(status_code=404, detail="还没有这段复述。") from exc
-    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
+    return _playable(path, mime, request)
 
 
 @app.get("/api/questions/{question_id}/echoes")
@@ -969,12 +983,12 @@ def question_echoes(question_id: str):
 
 
 @app.get("/api/sessions/{session_id}/audio/{index}")
-def get_audio(session_id: str, index: int):
+def get_audio(session_id: str, index: int, request: Request):
     try:
         path, mime = store.audio_path(session_id, index)
     except NotFound as exc:
         raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
-    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
+    return _playable(path, mime, request)
 
 
 @app.post("/api/turns")

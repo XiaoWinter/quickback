@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from app.playback import forget
+
 _ID = re.compile(r"^[a-f0-9]{32}$")
 _AUDIO = re.compile(r"^turn-\d{2}\.[A-Za-z0-9]{1,5}$")
 _SPEECH = re.compile(r"^turn-\d{2}-speech\.wav$")
@@ -71,6 +73,18 @@ def _prompt_text(en: str, zh: str) -> tuple[str, str]:
 def normalize_mime(mime: str | None) -> str:
     base = (mime or "").split(";", 1)[0].strip().lower()
     return base or "application/octet-stream"
+
+
+def _as_duration_ms(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0 or number > 10 * 60 * 1000:
+        return None
+    return number
 
 
 def _listed_chunks(owner: dict, scope: str, folder: Path) -> list[dict]:
@@ -328,6 +342,7 @@ class SessionStore:
             turn.pop("speech_error", None)
             turn.pop("retell_file", None)
             turn.pop("retell_mime", None)
+            turn.pop("retell_duration_ms", None)
             if session["turns"][-1]["index"] == index:
                 prompt = turn.get("prompt") or session["question"]
                 session["pending_prompt"] = {"en": prompt.get("en", ""), "zh": prompt.get("zh", "")}
@@ -635,7 +650,7 @@ class SessionStore:
             return None
         return item
 
-    def save_retell(self, session_id: str, index: int, data: bytes, mime: str) -> dict:
+    def save_retell(self, session_id: str, index: int, data: bytes, mime: str, duration_ms: int | None = None) -> dict:
         mime = normalize_mime(mime)
         ext = EXT_BY_MIME.get(mime)
         if not ext:
@@ -656,6 +671,11 @@ class SessionStore:
                 self._delete_named_files(folder, old)
             turn["retell_file"] = name
             turn["retell_mime"] = mime
+            ms = _as_duration_ms(duration_ms)
+            if ms is None:
+                turn.pop("retell_duration_ms", None)
+            else:
+                turn["retell_duration_ms"] = ms
             self._write(session)
             return session
 
@@ -669,10 +689,11 @@ class SessionStore:
             self._delete_named_files(self._dir(session_id), name)
             turn.pop("retell_file", None)
             turn.pop("retell_mime", None)
+            turn.pop("retell_duration_ms", None)
             self._write(session)
             return session
 
-    def save_variant_retell(self, session_id: str, index: int, level: str, data: bytes, mime: str) -> dict:
+    def save_variant_retell(self, session_id: str, index: int, level: str, data: bytes, mime: str, duration_ms: int | None = None) -> dict:
         level = self._level(level)
         mime = normalize_mime(mime)
         ext = EXT_BY_MIME.get(mime)
@@ -694,6 +715,11 @@ class SessionStore:
                 self._delete_named_files(folder, old)
             item["retell_file"] = name
             item["retell_mime"] = mime
+            ms = _as_duration_ms(duration_ms)
+            if ms is None:
+                item.pop("retell_duration_ms", None)
+            else:
+                item["retell_duration_ms"] = ms
             self._write(session)
             return session
 
@@ -709,6 +735,7 @@ class SessionStore:
             self._delete_named_files(self._dir(session_id), name)
             item.pop("retell_file", None)
             item.pop("retell_mime", None)
+            item.pop("retell_duration_ms", None)
             self._write(session)
             return session
 
@@ -1148,6 +1175,7 @@ class SessionStore:
             path = folder / name
             if path.is_file():
                 path.unlink()
+            forget(path)
 
     def _renumber_turns(self, folder: Path, turns: list[dict]) -> None:
         turns.sort(key=lambda item: item.get("index") or 0)

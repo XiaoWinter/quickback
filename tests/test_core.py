@@ -580,8 +580,9 @@ class RetellTests(unittest.TestCase):
                     ],
                 },
             )
-            saved = store.save_retell(session["id"], index, b"webm-retell", "audio/webm")
+            saved = store.save_retell(session["id"], index, b"webm-retell", "audio/webm", 1500)
             self.assertEqual(saved["turns"][0]["retell_file"], "turn-01-retell.webm")
+            self.assertEqual(saved["turns"][0]["retell_duration_ms"], 1500)
             path, mime = store.retell_path(session["id"], index)
             self.assertEqual(mime, "audio/webm")
             self.assertEqual(path.read_bytes(), b"webm-retell")
@@ -669,6 +670,7 @@ class RetellTests(unittest.TestCase):
             turn = cleared["turns"][0]
             self.assertNotIn("retell_file", turn)
             self.assertNotIn("retell_mime", turn)
+            self.assertNotIn("retell_duration_ms", turn)
             self.assertFalse(path.exists())
             self.assertEqual(turn["audio_file"], audio_name)
             self.assertTrue((Path(tmp) / session["id"] / audio_name).is_file())
@@ -693,9 +695,10 @@ class RetellTests(unittest.TestCase):
             self.assertEqual(simple["speech_file"], "turn-01-speech-simple.wav")
             kept = store.keep_existing_variant_speech(session["id"], index, "simple")
             self.assertEqual(kept["turns"][0]["feedback"]["variants"][0]["speech_file"], "turn-01-speech-simple.wav")
-            saved = store.save_variant_retell(session["id"], index, "simple", b"webm-simple", "audio/webm")
+            saved = store.save_variant_retell(session["id"], index, "simple", b"webm-simple", "audio/webm", 2100)
             simple = saved["turns"][0]["feedback"]["variants"][0]
             self.assertEqual(simple["retell_file"], "turn-01-retell-simple.webm")
+            self.assertEqual(simple["retell_duration_ms"], 2100)
             self.assertNotIn("retell_file", saved["turns"][0]["feedback"]["variants"][1])
             path, _mime = store.variant_retell_path(session["id"], index, "simple")
             cleared = store.drop_variant_retell(session["id"], index, "simple")
