@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Quickback</title>
-    <link rel="stylesheet" href="/static/app.css?v=82">
+    <link rel="stylesheet" href="/static/app.css?v=86">
 </head>
 <body>
   <div class="page">
@@ -24,6 +24,7 @@
         <a href="/history" id="tab-history" class="tab">记录</a>
         <a href="/questions" id="tab-questions" class="tab">题目</a>
         <a href="/progress" id="tab-progress" class="tab">进展</a>
+        <a href="/memos" id="tab-memos" class="tab">备忘录</a>
       </nav>
     </header>
 
@@ -74,6 +75,16 @@
       <section id="progress-stats-root"></section>
     </main>
 
+    <main id="memos" hidden>
+      <form id="memo-form" class="card memo-form">
+        <p class="kicker">新备忘</p>
+        <label>标题<input name="title" type="text" maxlength="80"></label>
+        <label>备忘<textarea name="text" required maxlength="2000" rows="4"></textarea></label>
+        <button type="submit" class="primary">添加</button>
+      </form>
+      <section id="memo-list" class="memo-list"></section>
+    </main>
+
     <footer class="foot">
       <p>录音存在这台电脑。识别和反馈会发给当前选中的模型。</p>
       <p class="cert-install"><a href="/api/cert">下载手机证书</a>安装后，再到证书信任设置里打开完全信任。</p>
@@ -91,6 +102,7 @@
   <script src="/static/chart.umd.min.js?v=4.4.6"></script>
   <script src="/static/progress.js?v=31"></script>
   <script src="/static/questions.js?v=39"></script>
-  <script src="/static/app.js?v=73"></script>
+  <script src="/static/memos.js?v=3"></script>
+  <script src="/static/app.js?v=74"></script>
 </body>
 </html>

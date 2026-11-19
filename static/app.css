@@ -592,7 +592,70 @@ h1 {
 
 .retry { padding: 0; }
 
-.history, .question-list { display: grid; gap: 0.6rem; }
+.history, .question-list, .memo-list { display: grid; gap: 0.6rem; }
+
+.memo-list { margin-top: 1rem; }
+
+.memo-form label, .memo-item label {
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 0.75rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.memo-form input,
+.memo-item input,
+.memo-form textarea,
+.memo-item textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.6rem 0.7rem;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  line-height: 1.45;
+}
+
+.memo-form textarea, .memo-item textarea { resize: vertical; }
+
+.memo-title {
+  margin: 0.45rem 0 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.memo-fold > summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.memo-fold > summary::-webkit-details-marker { display: none; }
+.memo-fold > summary::marker { content: ""; }
+
+.memo-fold > summary::before {
+  content: "";
+  flex: none;
+  width: 0.4rem;
+  height: 0.4rem;
+  margin-top: 0.45rem;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+}
+
+.memo-fold[open] > summary { margin-bottom: 0.35rem; }
+.memo-fold[open] > summary::before { transform: rotate(45deg); margin-top: 0.28rem; }
+.memo-fold > summary .memo-title { margin: 0; }
+
+.memo-text {
+  margin: 0.35rem 0 0;
+  white-space: pre-wrap;
+}
 
 .question-form label, .question-item label, .prompt-edit label {
   display: grid;

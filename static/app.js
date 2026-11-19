@@ -31,6 +31,7 @@ let questionToken = 0;
 const practiceEl = document.getElementById("practice");
 const historyEl = document.getElementById("history");
 const questionsEl = document.getElementById("questions");
+const memosEl = document.getElementById("memos");
 const bannerEl = document.getElementById("banner");
 const topicEl = document.getElementById("topic");
 const turnsEl = document.getElementById("turns");
@@ -1329,6 +1330,7 @@ function pagePath(name, question) {
     questions: "/questions",
     progress: "/progress",
     "progress-stats": "/progress/stats",
+    memos: "/memos",
   };
   const path = paths[name] || "/practice";
   if ((name === "progress" || name === "progress-stats") && question) {
@@ -1342,6 +1344,7 @@ function routeFromLocation() {
   const question = new URLSearchParams(location.search).get("question") || "";
   if (path === "/history") return { name: "history", question: "" };
   if (path === "/questions") return { name: "questions", question: "" };
+  if (path === "/memos") return { name: "memos", question: "" };
   if (path === "/progress/stats") return { name: "progress-stats", question };
   if (path === "/progress") return { name: "progress", question };
   return { name: "practice", question: "" };
@@ -1373,12 +1376,13 @@ function activate(tab) {
   practiceEl.hidden = tab !== "practice";
   historyEl.hidden = tab !== "history";
   questionsEl.hidden = tab !== "questions";
+  if (memosEl) memosEl.hidden = tab !== "memos";
   const progressEl = document.getElementById("progress");
   if (progressEl) progressEl.hidden = tab !== "progress";
   const statsEl = document.getElementById("progress-stats");
   if (statsEl) statsEl.hidden = tab !== "progress-stats";
   const activeTab = tab === "progress-stats" ? "progress" : tab;
-  ["practice", "history", "questions", "progress"].forEach((name) => {
+  ["practice", "history", "questions", "progress", "memos"].forEach((name) => {
     const tabButton = document.getElementById(`tab-${name}`);
     if (!tabButton) return;
     const on = name === activeTab;
@@ -2080,6 +2084,17 @@ async function openProgress(questionId) {
   }
 }
 
+async function showMemos() {
+  rememberRoute("memos");
+  activate("memos");
+  try {
+    await window.QuickbackMemos.show(api, showBanner);
+    window.scrollTo(0, 0);
+  } catch (error) {
+    showBanner(error.message);
+  }
+}
+
 async function showQuestions() {
   rememberRoute("questions");
   activate("questions");
@@ -2099,6 +2114,9 @@ document.getElementById("tab-history").addEventListener("click", (event) => {
 });
 document.getElementById("tab-questions").addEventListener("click", (event) => {
   if (followLink(event)) showQuestions();
+});
+document.getElementById("tab-memos").addEventListener("click", (event) => {
+  if (followLink(event)) showMemos();
 });
 document.getElementById("tab-progress").addEventListener("click", (event) => {
   if (!followLink(event)) return;
@@ -2219,6 +2237,7 @@ async function applyRoute() {
   try {
     if (route.name === "history") await showHistory();
     else if (route.name === "questions") await showQuestions();
+    else if (route.name === "memos") await showMemos();
     else if (route.name === "progress") await openProgress(route.question);
     else if (route.name === "progress-stats") await openProgressStats(route.question);
     else showPractice();

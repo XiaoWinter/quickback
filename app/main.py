@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from app.playback import for_client
 
 from app.config import ROOT, settings
+from app.memos import MemoError, create_memo, delete_memo, list_memos, update_memo
 from app.gemini_client import GeminiClient, ModelError, core_was_used
 from app.practice import PracticeStore
 from app.progress import ProgressStore
@@ -120,7 +121,7 @@ def _blank(value: str | None) -> str | None:
     return value or None
 
 
-_PAGES = {"practice", "history", "questions", "progress"}
+_PAGES = {"practice", "history", "questions", "progress", "memos"}
 
 
 def _page():
@@ -180,6 +181,39 @@ def provider_put(payload: dict):
         raise HTTPException(status_code=400, detail="只能选 Gemini 或千问。")
     providers.write(name)
     return _provider_view()
+
+
+@app.get("/api/memos")
+def memos_list():
+    try:
+        return list_memos()
+    except MemoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/memos")
+def memos_create(payload: dict):
+    try:
+        return create_memo(payload.get("text"), title=payload.get("title"))
+    except MemoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/memos/{memo_id}")
+def memos_update(memo_id: str, payload: dict):
+    try:
+        return update_memo(memo_id, payload.get("text"), title=payload.get("title"))
+    except MemoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/memos/{memo_id}")
+def memos_remove(memo_id: str):
+    try:
+        delete_memo(memo_id)
+    except MemoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 @app.get("/api/questions")
