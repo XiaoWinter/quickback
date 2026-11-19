@@ -4,27 +4,29 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Quickback</title>
-    <link rel="stylesheet" href="/static/app.css?v=86">
+    <link rel="stylesheet" href="/static/app.css?v=92">
 </head>
 <body>
   <div class="page">
     <header class="top">
-      <div>
-        <p class="brand">Quickback</p>
-        <h1>说完就回</h1>
-      </div>
-      <nav class="tabs" aria-label="页面">
+      <div class="top-bar">
+        <div>
+          <p class="brand">Quickback</p>
+          <h1>说完就回</h1>
+        </div>
         <label class="provider">模型
           <select id="provider" aria-label="模型">
             <option value="gemini">Gemini</option>
             <option value="qwen">千问</option>
           </select>
         </label>
+      </div>
+      <nav class="tabs" aria-label="页面">
         <a href="/practice" id="tab-practice" class="tab is-active" aria-current="page">练习</a>
         <a href="/history" id="tab-history" class="tab">记录</a>
         <a href="/questions" id="tab-questions" class="tab">题目</a>
         <a href="/progress" id="tab-progress" class="tab">进展</a>
-        <a href="/memos" id="tab-memos" class="tab">备忘录</a>
+        <a href="/memos" id="tab-memos" class="tab">备忘</a>
       </nav>
     </header>
 
@@ -79,7 +81,15 @@
       <form id="memo-form" class="card memo-form">
         <p class="kicker">新备忘</p>
         <label>标题<input name="title" type="text" maxlength="80"></label>
-        <label>备忘<textarea name="text" required maxlength="2000" rows="4"></textarea></label>
+        <label>备忘<textarea name="text" maxlength="2000" rows="4"></textarea></label>
+        <label class="memo-file-pick">附件
+          <input name="files" type="file" multiple accept="audio/*,video/*,image/*,.pdf,.epub,.mobi,.azw,.azw3,.txt,.md,.zip,.doc,.docx,.rtf,.odt">
+        </label>
+        <p id="memo-file-hint" class="note memo-file-hint">可选文件、音频、视频、文档或电子书，最多 8 个。</p>
+        <div id="memo-upload" class="memo-upload" hidden>
+          <p id="memo-upload-text" class="note"></p>
+          <div class="memo-upload-bar"><span id="memo-upload-fill"></span></div>
+        </div>
         <button type="submit" class="primary">添加</button>
       </form>
       <section id="memo-list" class="memo-list"></section>
@@ -102,7 +112,7 @@
   <script src="/static/chart.umd.min.js?v=4.4.6"></script>
   <script src="/static/progress.js?v=31"></script>
   <script src="/static/questions.js?v=39"></script>
-  <script src="/static/memos.js?v=3"></script>
+  <script src="/static/memos.js?v=8"></script>
   <script src="/static/app.js?v=74"></script>
 </body>
 </html>

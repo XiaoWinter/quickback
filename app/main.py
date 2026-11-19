@@ -9,7 +9,17 @@ from fastapi.staticfiles import StaticFiles
 from app.playback import for_client
 
 from app.config import ROOT, settings
-from app.memos import MemoError, create_memo, delete_memo, list_memos, update_memo
+from app.memos import (
+    MemoError,
+    add_files,
+    cover_path,
+    create_memo,
+    delete_file,
+    delete_memo,
+    file_path,
+    list_memos,
+    update_memo,
+)
 from app.gemini_client import GeminiClient, ModelError, core_was_used
 from app.practice import PracticeStore
 from app.progress import ProgressStore
@@ -183,6 +193,25 @@ def provider_put(payload: dict):
     return _provider_view()
 
 
+_MEMO_PART = 16 * 1024 * 1024 * 1024
+
+
+async def _memo_form(request: Request):
+    return await request.form(max_part_size=_MEMO_PART)
+
+
+async def _memo_uploads(form) -> list[tuple[str, str, bytes]]:
+    uploads = []
+    for key, value in form.multi_items():
+        if key != "files" or not hasattr(value, "read"):
+            continue
+        data = await value.read()
+        name = getattr(value, "filename", None) or "file"
+        mime = getattr(value, "content_type", None) or "application/octet-stream"
+        uploads.append((name, mime, data))
+    return uploads
+
+
 @app.get("/api/memos")
 def memos_list():
     try:
@@ -192,8 +221,19 @@ def memos_list():
 
 
 @app.post("/api/memos")
-def memos_create(payload: dict):
+async def memos_create(request: Request):
+    content_type = (request.headers.get("content-type") or "").lower()
     try:
+        if "multipart/form-data" in content_type:
+            form = await _memo_form(request)
+            return create_memo(
+                form.get("text"),
+                title=form.get("title"),
+                uploads=await _memo_uploads(form),
+            )
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise MemoError("请求不对。")
         return create_memo(payload.get("text"), title=payload.get("title"))
     except MemoError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -203,6 +243,47 @@ def memos_create(payload: dict):
 def memos_update(memo_id: str, payload: dict):
     try:
         return update_memo(memo_id, payload.get("text"), title=payload.get("title"))
+    except MemoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/memos/{memo_id}/files")
+async def memos_add_files(memo_id: str, request: Request):
+    try:
+        form = await _memo_form(request)
+        return add_files(memo_id, await _memo_uploads(form))
+    except MemoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/memos/{memo_id}/files/{file_id}")
+def memos_download(memo_id: str, file_id: str):
+    try:
+        path, entry = file_path(memo_id, file_id)
+    except MemoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=entry["mime"],
+        filename=entry["name"],
+        content_disposition_type="inline",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/api/memos/{memo_id}/files/{file_id}/cover")
+def memos_cover(memo_id: str, file_id: str):
+    try:
+        path, mime = cover_path(memo_id, file_id)
+    except MemoError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path, media_type=mime, headers={"Cache-Control": "no-cache"})
+
+
+@app.delete("/api/memos/{memo_id}/files/{file_id}")
+def memos_remove_file(memo_id: str, file_id: str):
+    try:
+        return delete_file(memo_id, file_id)
     except MemoError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
