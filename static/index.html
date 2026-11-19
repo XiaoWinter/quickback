@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Quickback</title>
-    <link rel="stylesheet" href="/static/app.css?v=92">
+    <link rel="stylesheet" href="/static/app.css?v=112">
 </head>
 <body>
   <div class="page">
@@ -60,11 +60,17 @@
     </main>
 
     <main id="questions" hidden>
-      <form id="question-form" class="card question-form">
+      <div class="memo-toolbar">
+        <button type="button" id="question-open-form" class="primary memo-open-form">＋ 添加</button>
+      </div>
+      <form id="question-form" class="card question-form" hidden>
         <p class="kicker">新题目</p>
         <label>英文问题<input name="en" type="text" required maxlength="240"></label>
         <label>中文意思<input name="zh" type="text" required maxlength="240"></label>
-        <button type="submit" class="primary">添加</button>
+        <div class="memo-form-actions">
+          <button type="submit" class="primary">保存</button>
+          <button type="button" id="question-close-form" class="text-btn">取消</button>
+        </div>
       </form>
       <section id="question-list" class="question-list"></section>
     </main>
@@ -78,19 +84,22 @@
     </main>
 
     <main id="memos" hidden>
-      <form id="memo-form" class="card memo-form">
+      <div class="memo-toolbar">
+        <button type="button" id="memo-open-form" class="primary memo-open-form">＋ 添加</button>
+      </div>
+      <form id="memo-form" class="card memo-form" hidden>
         <p class="kicker">新备忘</p>
         <label>标题<input name="title" type="text" maxlength="80"></label>
         <label>备忘<textarea name="text" maxlength="2000" rows="4"></textarea></label>
         <label class="memo-file-pick">附件
           <input name="files" type="file" multiple accept="audio/*,video/*,image/*,.pdf,.epub,.mobi,.azw,.azw3,.txt,.md,.zip,.doc,.docx,.rtf,.odt">
         </label>
+        <div id="memo-picked" class="memo-picked" hidden></div>
         <p id="memo-file-hint" class="note memo-file-hint">可选文件、音频、视频、文档或电子书，最多 8 个。</p>
-        <div id="memo-upload" class="memo-upload" hidden>
-          <p id="memo-upload-text" class="note"></p>
-          <div class="memo-upload-bar"><span id="memo-upload-fill"></span></div>
+        <div class="memo-form-actions">
+          <button type="submit" class="primary">保存</button>
+          <button type="button" id="memo-close-form" class="text-btn">取消</button>
         </div>
-        <button type="submit" class="primary">添加</button>
       </form>
       <section id="memo-list" class="memo-list"></section>
     </main>
@@ -109,10 +118,44 @@
       </div>
     </div>
   </div>
+  <div id="memo-lightbox" class="memo-lightbox" hidden>
+    <button type="button" class="memo-lightbox-close" id="memo-lightbox-close" aria-label="关闭">关闭</button>
+    <img id="memo-lightbox-img" alt="" hidden>
+    <iframe id="memo-lightbox-frame" class="memo-lightbox-frame" title="预览" hidden></iframe>
+  </div>
+  <div id="memo-upload" class="memo-upload" hidden>
+    <p id="memo-upload-text" class="note"></p>
+    <div class="memo-upload-bar"><span id="memo-upload-fill"></span></div>
+  </div>
+  <div id="memo-video-fs" class="memo-video-fs" hidden>
+    <div id="memo-video-fs-frame" class="memo-video-fs-frame">
+      <div class="memo-video-fs-ui" id="memo-video-fs-ui">
+        <div class="memo-video-fs-top">
+          <p class="memo-video-fs-hint" id="memo-video-fs-hint" hidden>横过来看更舒服</p>
+          <button type="button" class="memo-video-fs-close" id="memo-video-fs-close">退出</button>
+        </div>
+        <button type="button" class="memo-video-fs-toggle" id="memo-video-fs-toggle" aria-label="播放或暂停"></button>
+        <div class="memo-video-fs-bottom">
+          <div class="memo-video-fs-row">
+            <button type="button" class="memo-video-fs-play" id="memo-video-fs-play">播放</button>
+            <input type="range" class="memo-video-fs-seek" id="memo-video-fs-seek" min="0" max="0" step="0.1" value="0" aria-label="进度">
+            <span class="memo-video-fs-time" id="memo-video-fs-time">0:00 / 0:00</span>
+          </div>
+          <div class="memo-video-fs-row memo-video-fs-speeds" id="memo-video-fs-speeds" role="group" aria-label="播放速度">
+            <button type="button" data-rate="0.75">0.75x</button>
+            <button type="button" data-rate="1" class="is-on">1x</button>
+            <button type="button" data-rate="1.25">1.25x</button>
+            <button type="button" data-rate="1.5">1.5x</button>
+            <button type="button" data-rate="2">2x</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
   <script src="/static/chart.umd.min.js?v=4.4.6"></script>
   <script src="/static/progress.js?v=31"></script>
-  <script src="/static/questions.js?v=39"></script>
-  <script src="/static/memos.js?v=8"></script>
+  <script src="/static/questions.js?v=40"></script>
+  <script src="/static/memos.js?v=29"></script>
   <script src="/static/app.js?v=74"></script>
 </body>
 </html>

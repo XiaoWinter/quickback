@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>打开文件</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3efe6;
+      --ink: #1f1b16;
+      --muted: #6f675e;
+      --line: #e4dccf;
+      --card: #fffdf8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    .top {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.85rem 1rem;
+      border-bottom: 1px solid var(--line);
+      background: var(--card);
+    }
+    .top a, .top button {
+      flex: none;
+      appearance: none;
+      border: 0;
+      padding: 0;
+      color: var(--ink);
+      background: transparent;
+      text-decoration: none;
+      font: inherit;
+      font-size: 0.95rem;
+      cursor: pointer;
+    }
+    .top h1 {
+      margin: 0;
+      flex: 1;
+      min-width: 0;
+      font-size: 1rem;
+      font-weight: 600;
+      overflow-wrap: anywhere;
+    }
+    .stage {
+      display: grid;
+      gap: 0.85rem;
+      padding: 1.25rem 1rem 2rem;
+    }
+    .panel {
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--card);
+    }
+    .note { margin: 0; color: var(--muted); font-size: 0.92rem; line-height: 1.45; }
+    .bar {
+      height: 0.5rem;
+      margin-top: 0.85rem;
+      border-radius: 999px;
+      background: var(--line);
+      overflow: hidden;
+    }
+    .bar > span {
+      display: block;
+      height: 100%;
+      width: 0;
+      background: var(--ink);
+      transition: width 0.15s linear;
+    }
+    .bar.is-wait > span {
+      width: 35%;
+      animation: wait 1.1s ease-in-out infinite;
+    }
+    @keyframes wait {
+      0% { transform: translateX(-120%); }
+      100% { transform: translateX(320%); }
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      margin-top: 0.9rem;
+    }
+    .actions a {
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      padding: 0.55rem 0.95rem;
+      font: inherit;
+      font-size: 0.92rem;
+      text-decoration: none;
+      color: var(--ink);
+      background: #efe7da;
+    }
+    .actions .primary {
+      background: var(--ink);
+      color: var(--bg);
+    }
+    iframe {
+      width: 100%;
+      height: calc(100dvh - 4.5rem);
+      border: 0;
+      background: #fff;
+    }
+    .viewer { display: none; }
+    .viewer.is-on { display: block; }
+    .stage.is-open { padding: 0; }
+    .stage.is-open .panel { display: none; }
+    .stage.is-open .top-space { display: none; }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <button type="button" id="back">返回</button>
+    <h1 id="title">打开文件</h1>
+  </header>
+  <main id="stage" class="stage">
+    <section class="panel">
+      <p id="text" class="note">准备加载…</p>
+      <div id="bar" class="bar is-wait"><span id="fill"></span></div>
+      <div class="actions">
+        <a id="raw" class="primary" href="#">用系统打开</a>
+        <a id="download" href="#" download>下载</a>
+      </div>
+    </section>
+    <div id="viewer" class="viewer"></div>
+  </main>
+  <script>
+    (function () {
+      const params = new URLSearchParams(location.search);
+      const src = params.get("src") || "";
+      const name = params.get("name") || "文件";
+      const mime = params.get("mime") || "";
+      const size = Number(params.get("size") || 0);
+      const title = document.getElementById("title");
+      const text = document.getElementById("text");
+      const bar = document.getElementById("bar");
+      const fill = document.getElementById("fill");
+      const stage = document.getElementById("stage");
+      const viewer = document.getElementById("viewer");
+      const raw = document.getElementById("raw");
+      const download = document.getElementById("download");
+      const back = document.getElementById("back");
+      const isPdf = /^(application\/pdf)$/i.test(mime) || /\.pdf$/i.test(name);
+      const isImage = /^image\//i.test(mime);
+
+      title.textContent = name;
+      document.title = name;
+
+      function goBack() {
+        // 同页签打开时，返回备忘录页；不要依赖新标签 / referrer
+        if (window.history.length > 1) {
+          window.history.back();
+          return;
+        }
+        window.location.href = "/memos";
+      }
+
+      back.addEventListener("click", goBack);
+
+      if (!src) {
+        text.textContent = "缺少文件地址。";
+        bar.classList.remove("is-wait");
+        return;
+      }
+      raw.href = src;
+      download.href = src;
+      download.download = name;
+
+      function formatSize(n) {
+        if (!n) return "";
+        if (n < 1024) return n + " B";
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+        return (n / (1024 * 1024)).toFixed(1) + " MB";
+      }
+
+      function setProgress(loaded, total) {
+        bar.classList.remove("is-wait");
+        const pct = total ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+        fill.style.width = pct + "%";
+        text.textContent = total
+          ? "已加载 " + pct + "% · " + formatSize(loaded) + " / " + formatSize(total)
+          : "已加载 " + formatSize(loaded);
+      }
+
+      function showViewer(node) {
+        viewer.replaceChildren(node);
+        viewer.classList.add("is-on");
+        stage.classList.add("is-open");
+        document.querySelector(".top").hidden = true;
+      }
+
+      // PDF：交给浏览器/系统阅读器（手机上 iframe 基本不能正常翻页阅读）
+      // 用 replace，返回时直接回到备忘录，不会卡在中间页
+      if (isPdf) {
+        const tip = size ? "（约 " + formatSize(size) + "）" : "";
+        text.textContent = "正在交给系统阅读器打开" + tip + "…";
+        bar.classList.add("is-wait");
+        fill.style.width = "35%";
+        window.setTimeout(function () {
+          window.location.replace(src);
+        }, 120);
+        return;
+      }
+
+      if (!isImage) {
+        text.textContent = "此格式可能无法在浏览器内预览，可下载后用其他应用打开。";
+        bar.classList.remove("is-wait");
+        fill.style.width = "0%";
+        return;
+      }
+
+      text.textContent = "正在加载" + (size ? "（约 " + formatSize(size) + "）" : "") + "…";
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", src);
+      xhr.responseType = "blob";
+      xhr.onprogress = function (event) {
+        if (event.lengthComputable) setProgress(event.loaded, event.total);
+        else if (size) setProgress(event.loaded, size);
+        else text.textContent = "已加载 " + formatSize(event.loaded);
+      };
+      xhr.onload = function () {
+        if (xhr.status < 200 || xhr.status >= 300) {
+          text.textContent = "加载失败，可点「用系统打开」或「下载」。";
+          bar.classList.remove("is-wait");
+          return;
+        }
+        const blob = xhr.response;
+        const type = blob.type || mime || "application/octet-stream";
+        const url = URL.createObjectURL(blob.slice(0, blob.size, type));
+        const img = document.createElement("img");
+        img.src = url;
+        img.alt = name;
+        img.style.cssText = "display:block;width:100%;height:auto;background:#fff";
+        showViewer(img);
+        window.addEventListener("pagehide", function () { URL.revokeObjectURL(url); });
+      };
+      xhr.onerror = function () {
+        text.textContent = "加载失败，可点「用系统打开」或「下载」。";
+        bar.classList.remove("is-wait");
+      };
+      xhr.send();
+    })();
+  </script>
+</body>
+</html>

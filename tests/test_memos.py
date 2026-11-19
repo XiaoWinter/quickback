@@ -160,13 +160,22 @@ class MemoApiTests(unittest.TestCase):
         downloaded = self.client.get(f"/api/memos/{body['id']}/files/{file_id}")
         self.assertEqual(downloaded.status_code, 200)
         self.assertEqual(downloaded.content, b"mp3-data")
-        self.assertIn("clip.mp3", downloaded.headers.get("content-disposition", ""))
+        self.assertEqual(downloaded.headers.get("accept-ranges"), "bytes")
         more = self.client.post(
             f"/api/memos/{body['id']}/files",
-            files=[("files", ("clip.mp4", b"mp4-data", "video/mp4"))],
+            files=[("files", ("clip.mp4", b"0123456789abcdef", "video/mp4"))],
         )
         self.assertEqual(more.status_code, 200)
         self.assertEqual(len(more.json()["files"]), 2)
+        video_id = more.json()["files"][1]["id"]
+        partial = self.client.get(
+            f"/api/memos/{body['id']}/files/{video_id}",
+            headers={"Range": "bytes=0-3"},
+        )
+        self.assertEqual(partial.status_code, 206)
+        self.assertEqual(partial.content, b"0123")
+        self.assertEqual(partial.headers.get("accept-ranges"), "bytes")
+        self.assertTrue((partial.headers.get("content-range") or "").startswith("bytes 0-3/"))
         dropped = self.client.delete(f"/api/memos/{body['id']}/files/{file_id}")
         self.assertEqual(dropped.status_code, 200)
         self.assertEqual(len(dropped.json()["files"]), 1)

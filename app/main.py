@@ -148,6 +148,14 @@ def progress_stats_page():
     return _page()
 
 
+@app.get("/file-view")
+def file_view_page():
+    return FileResponse(
+        ROOT / "static" / "file-view.html",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/{page}")
 def app_page(page: str):
     if page not in _PAGES:
@@ -262,12 +270,21 @@ def memos_download(memo_id: str, file_id: str):
         path, entry = file_path(memo_id, file_id)
     except MemoError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    mime = entry["mime"]
+    headers = {
+        # 允许浏览器短时缓存，避免大文件每次从零拉；仍可用 ETag / Range
+        "Cache-Control": "private, max-age=86400",
+        "Accept-Ranges": "bytes",
+    }
+    # 音视频靠 Range 边播边拉；带 filename 时部分手机浏览器会整文件下载
+    if mime.startswith("video/") or mime.startswith("audio/"):
+        return FileResponse(path, media_type=mime, headers=headers)
     return FileResponse(
         path,
-        media_type=entry["mime"],
+        media_type=mime,
         filename=entry["name"],
         content_disposition_type="inline",
-        headers={"Cache-Control": "no-cache"},
+        headers=headers,
     )
 
 

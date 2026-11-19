@@ -1,6 +1,9 @@
 (function () {
   const form = document.getElementById("question-form");
   const list = document.getElementById("question-list");
+  const openFormBtn = document.getElementById("question-open-form");
+  const closeFormBtn = document.getElementById("question-close-form");
+  const saveBtn = form ? form.querySelector('button[type="submit"]') : null;
   let api = null;
   let report = null;
   let answer = null;
@@ -9,6 +12,21 @@
   let openStats = null;
   let editingId = null;
   let currentId = "";
+  let busy = false;
+
+  function openQuestionForm() {
+    if (!form) return;
+    form.hidden = false;
+    if (openFormBtn) openFormBtn.hidden = true;
+    form.querySelector('[name="en"]')?.focus();
+  }
+
+  function closeQuestionForm() {
+    if (!form) return;
+    form.hidden = true;
+    form.reset();
+    if (openFormBtn) openFormBtn.hidden = false;
+  }
 
   function formatWhen(iso) {
     const date = new Date(iso);
@@ -131,20 +149,43 @@
     render(questions);
   }
 
+  if (openFormBtn) {
+    openFormBtn.addEventListener("click", () => openQuestionForm());
+  }
+  if (closeFormBtn) {
+    closeFormBtn.addEventListener("click", () => {
+      if (busy) return;
+      closeQuestionForm();
+      report("");
+    });
+  }
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (busy) return;
     const data = new FormData(form);
+    busy = true;
+    if (saveBtn) {
+      saveBtn.disabled = true;
+      saveBtn.textContent = "保存中…";
+    }
     try {
       await api("/api/questions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ en: data.get("en"), zh: data.get("zh") }),
       });
-      form.reset();
       report("");
+      closeQuestionForm();
       await reload();
     } catch (error) {
       report(error.message);
+    } finally {
+      busy = false;
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "保存";
+      }
     }
   });
 
