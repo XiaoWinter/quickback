@@ -11,6 +11,12 @@ from app.storage import now_iso
 QUESTIONS_PATH = ROOT / "questions.json"
 _ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _lock = threading.Lock()
+CATEGORY_LIMIT = 20
+IELTS_PART_CATEGORY = {
+    "part1": "口语1",
+    "part2": "口语2",
+    "part3": "口语3",
+}
 
 
 class QuestionError(Exception):
@@ -23,6 +29,13 @@ def _path(path: Path | None) -> Path:
 
 def _clean(value) -> str:
     return str(value or "").strip()
+
+
+def _category(value) -> str:
+    text = _clean(value)
+    if len(text) > CATEGORY_LIMIT:
+        raise QuestionError(f"类别最多 {CATEGORY_LIMIT} 个字。")
+    return text
 
 
 def _slug(en: str) -> str:
@@ -111,7 +124,18 @@ def load_questions(path: Path | None = None) -> list[dict]:
         seen.add(qid)
         created = _time(item.get("created_at"))
         updated = _time(item.get("updated_at")) or created
-        questions.append({"id": qid, "en": en, "zh": zh, "created_at": created, "updated_at": updated})
+        # 旧题目没有 category 时默认空字符串
+        category = _clean(item.get("category"))
+        if len(category) > CATEGORY_LIMIT:
+            category = category[:CATEGORY_LIMIT]
+        questions.append({
+            "id": qid,
+            "en": en,
+            "zh": zh,
+            "category": category,
+            "created_at": created,
+            "updated_at": updated,
+        })
     questions.sort(key=lambda item: item.get("created_at") or "", reverse=True)
     return questions
 
@@ -138,8 +162,9 @@ def get_question(question_id: str) -> dict:
     raise QuestionError(f"没有这道题：{question_id}")
 
 
-def create_question(en: str, zh: str, path: Path | None = None) -> dict:
+def create_question(en: str, zh: str, category: str = "", *, path: Path | None = None) -> dict:
     en, zh = _clean(en), _clean(zh)
+    category = _category(category)
     if not en or not zh:
         raise QuestionError("英文和中文都要写。")
     file = _path(path)
@@ -150,6 +175,7 @@ def create_question(en: str, zh: str, path: Path | None = None) -> dict:
             "id": _unique_id(en, {q["id"] for q in questions}),
             "en": en,
             "zh": zh,
+            "category": category,
             "created_at": now,
             "updated_at": now,
         }
@@ -158,7 +184,44 @@ def create_question(en: str, zh: str, path: Path | None = None) -> dict:
         return item
 
 
-def update_question(question_id: str, en: str, zh: str, path: Path | None = None) -> dict:
+def create_questions(items: list[dict], *, path: Path | None = None) -> list[dict]:
+    if not items:
+        raise QuestionError("没有可保存的题目。")
+    file = _path(path)
+    with _lock:
+        questions = load_questions(file)
+        taken = {q["id"] for q in questions}
+        now = now_iso()
+        made: list[dict] = []
+        for raw in items:
+            en, zh = _clean(raw.get("en")), _clean(raw.get("zh"))
+            category = _category(raw.get("category"))
+            if not en or not zh:
+                raise QuestionError("英文和中文都要写。")
+            item = {
+                "id": _unique_id(en, taken),
+                "en": en,
+                "zh": zh,
+                "category": category,
+                "created_at": now,
+                "updated_at": now,
+            }
+            taken.add(item["id"])
+            made.append(item)
+        for item in reversed(made):
+            questions.insert(0, item)
+        _persist(questions, file)
+        return made
+
+
+def update_question(
+    question_id: str,
+    en: str,
+    zh: str,
+    category: str | None = None,
+    *,
+    path: Path | None = None,
+) -> dict:
     en, zh = _clean(en), _clean(zh)
     if not en or not zh:
         raise QuestionError("英文和中文都要写。")
@@ -169,11 +232,53 @@ def update_question(question_id: str, en: str, zh: str, path: Path | None = None
             if item["id"] == question_id:
                 item["en"] = en
                 item["zh"] = zh
+                if category is not None:
+                    item["category"] = _category(category)
+                else:
+                    item["category"] = _clean(item.get("category"))
                 item["created_at"] = item["created_at"] or now_iso()
                 item["updated_at"] = now_iso()
                 _persist(questions, file)
                 return item
     raise QuestionError(f"没有这道题：{question_id}")
+
+
+def _clip_pair(en: str, zh: str) -> tuple[str, str]:
+    if len(en) > 240:
+        en = en[:240].rstrip()
+    if len(zh) > 240:
+        zh = zh[:240].rstrip()
+    return en, zh
+
+
+def parse_ielts_speaking(data: dict) -> list[dict]:
+    if not isinstance(data, dict):
+        raise QuestionError("模型返回的题目格式不对。")
+    made: list[dict] = []
+    for key, category in IELTS_PART_CATEGORY.items():
+        part = data.get(key)
+        if not isinstance(part, dict):
+            raise QuestionError(f"模型没有返回完整的 {category}。")
+        en, zh = _clean(part.get("en")), _clean(part.get("zh"))
+        if not en or not zh:
+            raise QuestionError(f"{category} 的英文或中文是空的。")
+        en, zh = _clip_pair(en, zh)
+        made.append({"en": en, "zh": zh, "category": category})
+    return made
+
+
+def parse_ielts_part(data: dict, part: str) -> dict:
+    key = _clean(part)
+    category = IELTS_PART_CATEGORY.get(key)
+    if not category:
+        raise QuestionError("只能刷新口语1、口语2或口语3。")
+    if not isinstance(data, dict):
+        raise QuestionError("模型返回的题目格式不对。")
+    en, zh = _clean(data.get("en")), _clean(data.get("zh"))
+    if not en or not zh:
+        raise QuestionError(f"{category} 的英文或中文是空的。")
+    en, zh = _clip_pair(en, zh)
+    return {"en": en, "zh": zh, "category": category}
 
 
 def delete_question(question_id: str, path: Path | None = None) -> None:

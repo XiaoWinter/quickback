@@ -13,6 +13,7 @@ _QUESTION = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _RUN = re.compile(r"^[a-f0-9]{32}$")
 _FILE = re.compile(r"^(?:pending|\d{2})\.(?:webm|m4a|mp3|wav|ogg)$")
 _CORRECTED = re.compile(r"^\d{2}-corrected\.wav$")
+_NATIVE = re.compile(r"^\d{2}-native\.wav$")
 
 DRAFT_LIMIT = 8
 DRAFT_LENGTH = 120
@@ -373,6 +374,8 @@ class ProgressStore:
                 "fixes": _stored_fixes(parsed.get("fixes")),
                 "natural": str(parsed.get("natural") or "")[:800],
                 "natural_zh": str(parsed.get("natural_zh") or "")[:800],
+                "native": str(parsed.get("native") or "")[:800],
+                "native_zh": str(parsed.get("native_zh") or "")[:800],
                 "raw": raw,
                 "bonus": 0,
             }
@@ -384,6 +387,11 @@ class ProgressStore:
                 stale = folder / f"{number:02d}-corrected.wav"
                 if stale.is_file():
                     stale.unlink()
+            if not scored["native"]:
+                scored["native_file"] = ""
+                stale_native = folder / f"{number:02d}-native.wav"
+                if stale_native.is_file():
+                    stale_native.unlink()
             if target is not None:
                 target.update(scored)
             else:
@@ -453,7 +461,37 @@ class ProgressStore:
         if folder.is_dir():
             shutil.rmtree(folder)
 
-    def save_corrected(self, run_id: str, number: int, data: bytes) -> None:
+    def question_id_for(self, run_id: str) -> str:
+        with self._lock:
+            run = self._locate(run_id)
+            question_id = str(run.get("question_id") or "")
+            if not question_id:
+                raise NotFound("找不到这次进展。")
+            return question_id
+
+    def corrected_text(self, run_id: str, number: int) -> str:
+        with self._lock:
+            run = self._locate(run_id)
+            target = next(
+                (item for item in run.get("answers") or [] if int(item.get("number") or 0) == int(number)),
+                None,
+            )
+            if target is None:
+                raise NotFound("没有这道题。")
+            return str(target.get("natural") or "").strip()
+
+    def native_text(self, run_id: str, number: int) -> str:
+        with self._lock:
+            run = self._locate(run_id)
+            target = next(
+                (item for item in run.get("answers") or [] if int(item.get("number") or 0) == int(number)),
+                None,
+            )
+            if target is None:
+                raise NotFound("没有这道题。")
+            return str(target.get("native") or "").strip()
+
+    def save_corrected(self, run_id: str, number: int, data: bytes, provider: str | None = None) -> None:
         name = f"{int(number):02d}-corrected.wav"
         if not _CORRECTED.match(name) or not data:
             raise StorageError("没有可以保存的修正版发音。")
@@ -468,6 +506,32 @@ class ProgressStore:
             path = self._folder(run) / name
             path.write_bytes(data)
             target["corrected_file"] = name
+            if provider:
+                target["corrected_provider"] = provider
+            else:
+                target.pop("corrected_provider", None)
+            run["updated_at"] = now_iso()
+            self._write(run)
+
+    def save_native(self, run_id: str, number: int, data: bytes, provider: str | None = None) -> None:
+        name = f"{int(number):02d}-native.wav"
+        if not _NATIVE.match(name) or not data:
+            raise StorageError("没有可以保存的地道版发音。")
+        with self._lock:
+            run = self._locate(run_id)
+            target = next(
+                (item for item in run.get("answers") or [] if int(item.get("number") or 0) == int(number)),
+                None,
+            )
+            if target is None:
+                raise NotFound("没有这道题。")
+            path = self._folder(run) / name
+            path.write_bytes(data)
+            target["native_file"] = name
+            if provider:
+                target["native_provider"] = provider
+            else:
+                target.pop("native_provider", None)
             run["updated_at"] = now_iso()
             self._write(run)
 
@@ -487,6 +551,23 @@ class ProgressStore:
                     return path
                 break
         raise NotFound("找不到这段修正版。")
+
+    def native_path(self, run_id: str, number: int) -> Path:
+        name = f"{int(number):02d}-native.wav"
+        if not _NATIVE.match(name):
+            raise NotFound("找不到这段地道版。")
+        with self._lock:
+            run = self._locate(run_id)
+            for item in run.get("answers") or []:
+                if int(item.get("number") or 0) != int(number):
+                    continue
+                if item.get("native_file") != name:
+                    break
+                path = self._folder(run) / name
+                if path.is_file() and path.stat().st_size > 0:
+                    return path
+                break
+        raise NotFound("找不到这段地道版。")
 
     def audio_path(self, run_id: str, number: int) -> tuple[Path, str]:
         with self._lock:
@@ -580,6 +661,13 @@ class ProgressStore:
         if not _CORRECTED.match(name):
             return False
         path = folder / name
+        return path.is_file() and path.stat().st_size > 0
+
+    def _has_native(self, folder: Path, item: dict) -> bool:
+        name = str(item.get("native_file") or "")
+        if not _NATIVE.match(name):
+            return False
+        path = folder / name
         return path.is_file() and path.stat().st_size > 0 and path.parent == folder
 
     def _public(self, run: dict) -> dict:
@@ -605,7 +693,12 @@ class ProgressStore:
                     "has_audio": bool(audio and audio.is_file()),
                     "natural": str(item.get("natural") or ""),
                     "natural_zh": str(item.get("natural_zh") or ""),
+                    "native": str(item.get("native") or ""),
+                    "native_zh": str(item.get("native_zh") or ""),
                     "has_corrected": self._has_corrected(folder, item),
+                    "has_native": self._has_native(folder, item),
+                    "corrected_provider": str(item.get("corrected_provider") or ""),
+                    "native_provider": str(item.get("native_provider") or ""),
                 }
             )
         pending_error = ""

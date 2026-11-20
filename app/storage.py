@@ -829,7 +829,15 @@ class SessionStore:
                 self._write(session)
             return session
 
-    def save_variant_speech(self, session_id: str, index: int, level: str, data: bytes, text: str | None = None) -> dict:
+    def save_variant_speech(
+        self,
+        session_id: str,
+        index: int,
+        level: str,
+        data: bytes,
+        text: str | None = None,
+        provider: str | None = None,
+    ) -> dict:
         level = self._level(level)
         name = f"turn-{index:02d}-speech-{level}.wav"
         if not _VARIANT_SPEECH.match(name):
@@ -846,6 +854,10 @@ class SessionStore:
             (self._dir(session_id) / name).write_bytes(data)
             item["speech_file"] = name
             item["speech_mime"] = "audio/wav"
+            if provider:
+                item["speech_provider"] = provider
+            else:
+                item.pop("speech_provider", None)
             self._write(session)
             return session
 
@@ -1018,6 +1030,7 @@ class SessionStore:
             "mime": str(chosen.get("speech_mime") or "audio/wav"),
             "has_speech": has_file,
             "natural": natural,
+            "speech_provider": str(chosen.get("speech_provider") or ""),
             "audio": path.read_bytes() if has_file and load else b"",
         }
 
@@ -1028,6 +1041,7 @@ class SessionStore:
             self._delete_named_files(self._dir(session_id), turn.get("speech_file"))
             turn.pop("speech_file", None)
             turn.pop("speech_mime", None)
+            turn.pop("speech_provider", None)
             turn.pop("speech_error", None)
             self._write(session)
             return session
@@ -1051,7 +1065,14 @@ class SessionStore:
                 self._write(session)
             return session
 
-    def save_speech(self, session_id: str, index: int, data: bytes, natural: str | None = None) -> dict:
+    def save_speech(
+        self,
+        session_id: str,
+        index: int,
+        data: bytes,
+        natural: str | None = None,
+        provider: str | None = None,
+    ) -> dict:
         name = f"turn-{index:02d}-speech.wav"
         if not _SPEECH.match(name):
             raise NotFound(session_id)
@@ -1064,6 +1085,10 @@ class SessionStore:
             (self._dir(session_id) / name).write_bytes(data)
             turn["speech_file"] = name
             turn["speech_mime"] = "audio/wav"
+            if provider:
+                turn["speech_provider"] = provider
+            else:
+                turn.pop("speech_provider", None)
             turn.pop("speech_error", None)
             self._write(session)
             return session

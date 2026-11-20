@@ -324,6 +324,8 @@ class StoreTests(unittest.TestCase):
             self.assertIn("fridge", page["natural"])
             self.assertTrue(page["has_corrected"])
             self.assertTrue(store.corrected_path(opened["id"], 1).is_file())
+            self.assertEqual(store.question_id_for(opened["id"]), "animals")
+            self.assertIn("fridge", store.corrected_text(opened["id"], 1))
 
 
 class CorrectedSpeechTests(unittest.TestCase):

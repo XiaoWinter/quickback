@@ -8,6 +8,7 @@
   ];
   const root = document.getElementById("progress-root");
   const statsRoot = document.getElementById("progress-stats-root");
+  let openRun = null;
   let api = null;
   let report = null;
   let questionId = "";
@@ -28,7 +29,6 @@
   let retake = null;
   const speechReady = new Set();
   const speechJobs = new Set();
-  const speechNotes = new Map();
 
   function formatWhen(iso) {
     const date = new Date(iso);
@@ -338,6 +338,10 @@
       card.appendChild(said);
     }
     attachCorrected(card, item.corrected_speech);
+    attachNative(card, item.native_speech || {
+      natural: item.native || "",
+      natural_zh: item.native_zh || "",
+    });
     DIMENSIONS.forEach(([key, label]) => {
       const scores = item.scores || {};
       if (scores[key] == null || scores[key] === "") return;
@@ -361,8 +365,217 @@
     return card;
   }
 
+  function speechKey(ref, kind) {
+    if (ref.run_id) return `progress:${kind}:${ref.run_id}:${ref.number}`;
+    if (ref.session_id) return `session:${kind}:${ref.session_id}:${ref.index}`;
+    return "";
+  }
+
+  function speechSrc(ref, kind) {
+    if (kind === "native" && ref.run_id && ref.number) {
+      return `/api/progress/${ref.run_id}/native/${ref.number}`;
+    }
+    if (ref.run_id && ref.number) return `/api/progress/${ref.run_id}/speech/${ref.number}`;
+    if (ref.session_id && ref.index != null) return `/api/sessions/${ref.session_id}/speech/${ref.index}`;
+    return ref.audio_url || "";
+  }
+
+  function speechCreate(ref, kind) {
+    if (kind === "native" && ref.run_id && ref.number) {
+      return `/api/progress/${ref.run_id}/native/${ref.number}`;
+    }
+    if (ref.run_id && ref.number) return `/api/progress/${ref.run_id}/speech/${ref.number}`;
+    if (ref.session_id && ref.index != null) {
+      return `/api/sessions/${ref.session_id}/turns/${ref.index}/speech`;
+    }
+    return "";
+  }
+
+  function speechProviderLabel(id) {
+    if (window.QuickbackSpeech && typeof window.QuickbackSpeech.label === "function") {
+      return window.QuickbackSpeech.label(id);
+    }
+    if (id === "qwen") return "千问";
+    if (id === "gemini") return "Gemini";
+    return id || "";
+  }
+
+  function speechProviders() {
+    if (window.QuickbackSpeech && Array.isArray(window.QuickbackSpeech.providers)) {
+      return window.QuickbackSpeech.providers;
+    }
+    return [];
+  }
+
+  function currentSpeechProvider() {
+    if (window.QuickbackSpeech && window.QuickbackSpeech.provider) {
+      return window.QuickbackSpeech.provider;
+    }
+    return "gemini";
+  }
+
+  function speechAudioSrc(ref, kind) {
+    const base = speechSrc(ref, kind);
+    if (!base) return "";
+    const who = ref.speech_provider || "";
+    const stamp = who || (speechReady.has(speechKey(ref, kind)) ? "ready" : "0");
+    return `${base}${base.includes("?") ? "&" : "?"}v=${encodeURIComponent(stamp)}`;
+  }
+
+  function requestProgressSpeech(ref, kind, provider, force) {
+    const createUrl = speechCreate(ref, kind);
+    const body = { provider: provider || currentSpeechProvider() };
+    if (force) body.force = true;
+    return api(createUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((page) => {
+      if (ref.run_id) {
+        const runs = [];
+        if (page && page.open) runs.push(page.open);
+        (page && page.runs ? page.runs : []).forEach((item) => runs.push(item));
+        const run = runs.find((item) => item && item.id === ref.run_id);
+        const answer = ((run && run.answers) || []).find((item) => Number(item.number) === Number(ref.number));
+        const next = kind === "native"
+          ? answer && answer.native_speech
+          : answer && answer.corrected_speech;
+        if (next) {
+          ref.has_speech = Boolean(next.has_speech);
+          ref.speech_provider = next.speech_provider || provider || "";
+          ref.audio_url = next.audio_url || speechSrc(ref, kind);
+        } else {
+          ref.has_speech = true;
+          ref.speech_provider = provider || currentSpeechProvider();
+        }
+        return ref;
+      }
+      if (ref.session_id) {
+        const turn = ((page && page.turns) || []).find((item) => item.index === ref.index);
+        ref.has_speech = Boolean(turn && turn.speech_file);
+        ref.speech_provider = (turn && turn.speech_provider) || provider || "";
+        ref.audio_url = `/api/sessions/${ref.session_id}/speech/${ref.index}`;
+      }
+      return ref;
+    });
+  }
+
+  function refreshListen(slot, box, ref, kind, failText) {
+    if (slot && slot.isConnected) slot.remove();
+    appendListen(box, ref, kind, failText);
+  }
+
+  function appendListen(box, ref, kind, failText) {
+    const key = speechKey(ref, kind);
+    const createUrl = speechCreate(ref, kind);
+    if ((ref.has_speech || (key && speechReady.has(key))) && (ref.audio_url || speechSrc(ref, kind))) {
+      const wrap = document.createElement("div");
+      wrap.className = "speech-block";
+      const player = recordingPlayer(speechAudioSrc(ref, kind), 0);
+      if (player) wrap.appendChild(player);
+      const meta = document.createElement("div");
+      meta.className = "speech-meta";
+      const note = document.createElement("p");
+      note.className = "note";
+      const who = ref.speech_provider || "";
+      note.textContent = who ? `发音 · ${speechProviderLabel(who)}` : "发音";
+      meta.appendChild(note);
+      const actions = document.createElement("div");
+      actions.className = "speech-actions";
+      speechProviders().forEach((item) => {
+        if (!item.has_key) return;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "text-btn";
+        btn.textContent = `用${item.label || speechProviderLabel(item.id)}重录`;
+        btn.addEventListener("click", () => {
+          if (!api || (key && speechJobs.has(key))) return;
+          btn.disabled = true;
+          btn.textContent = "正在准备发音…";
+          if (key) speechJobs.add(key);
+          requestProgressSpeech(ref, kind, item.id, true)
+            .then(() => {
+              if (key) speechReady.add(key);
+              refreshListen(wrap, box, ref, kind, failText);
+            })
+            .catch((error) => {
+              if (btn.isConnected) {
+                btn.disabled = false;
+                btn.textContent = error.message || failText;
+              }
+            })
+            .finally(() => {
+              if (key) speechJobs.delete(key);
+            });
+        });
+        actions.appendChild(btn);
+      });
+      if (actions.childElementCount) meta.appendChild(actions);
+      wrap.appendChild(meta);
+      box.appendChild(wrap);
+      return;
+    }
+    if (!(ref.natural || "").trim() || !createUrl || !api) return;
+    const listen = document.createElement("button");
+    listen.type = "button";
+    listen.className = "text-btn";
+    if (key && speechJobs.has(key)) {
+      listen.disabled = true;
+      listen.textContent = "正在准备发音…";
+      box.appendChild(listen);
+      return;
+    }
+    const current = currentSpeechProvider();
+    listen.textContent = `听发音（${speechProviderLabel(current)}）`;
+    listen.addEventListener("click", () => {
+      if (!api || (key && speechJobs.has(key))) return;
+      listen.disabled = true;
+      listen.textContent = "正在准备发音…";
+      if (key) speechJobs.add(key);
+      requestProgressSpeech(ref, kind, current, false)
+        .then(() => {
+          if (key) speechReady.add(key);
+          refreshListen(listen, box, ref, kind, failText);
+        })
+        .catch((error) => {
+          if (listen.isConnected) {
+            listen.disabled = false;
+            listen.textContent = error.message || failText;
+          }
+        })
+        .finally(() => {
+          if (key) speechJobs.delete(key);
+        });
+    });
+    box.appendChild(listen);
+  }
+
+  function attachNative(card, ref) {
+    if (!ref || (!(ref.natural || "").trim() && !(ref.natural_zh || "").trim())) return;
+    const box = document.createElement("div");
+    box.className = "progress-corrected progress-native";
+    const label = document.createElement("p");
+    label.className = "block-label rank-2";
+    label.textContent = "地道版";
+    box.appendChild(label);
+    if ((ref.natural || "").trim()) {
+      const line = document.createElement("p");
+      line.className = "progress-said";
+      line.textContent = ref.natural.trim();
+      box.appendChild(line);
+    }
+    if ((ref.natural_zh || "").trim()) {
+      const zh = document.createElement("p");
+      zh.className = "zh-line";
+      zh.textContent = ref.natural_zh.trim();
+      box.appendChild(zh);
+    }
+    appendListen(box, ref, "native", "地道版录音没准备好。");
+    card.appendChild(box);
+  }
+
   function attachCorrected(card, ref) {
-    if (!ref || (!ref.session_id && !(ref.natural || "").trim() && !ref.audio_url)) return;
+    if (!ref || (!ref.session_id && !ref.run_id && !(ref.natural || "").trim() && !ref.audio_url)) return;
     const box = document.createElement("div");
     box.className = "progress-corrected";
     const label = document.createElement("p");
@@ -381,47 +594,8 @@
       zh.textContent = ref.natural_zh.trim();
       box.appendChild(zh);
     }
-    const src = ref.audio_url || "";
-    const key = `${ref.session_id}:${ref.index}`;
-    if ((ref.has_speech || speechReady.has(key)) && src) {
-      const player = recordingPlayer(src, 0);
-      if (player) box.appendChild(player);
-      card.appendChild(box);
-      return;
-    }
-    if (!ref.session_id) {
-      card.appendChild(box);
-      return;
-    }
-    const note = document.createElement("p");
-    note.className = "note";
-    note.textContent = "正在准备发音…";
-    box.appendChild(note);
+    appendListen(box, ref, "corrected", "修正版录音没准备好。");
     card.appendChild(box);
-    let notes = speechNotes.get(key);
-    if (!notes) {
-      notes = new Set();
-      speechNotes.set(key, notes);
-    }
-    notes.add(note);
-    if (speechJobs.has(key) || !api) return;
-    speechJobs.add(key);
-    api(`/api/sessions/${ref.session_id}/turns/${ref.index}/speech`, { method: "POST" })
-      .then(() => {
-        speechReady.add(key);
-        (speechNotes.get(key) || []).forEach((current) => {
-          if (!current.isConnected) return;
-          const player = recordingPlayer(src, 0);
-          if (player) current.replaceWith(player);
-        });
-        speechNotes.delete(key);
-      })
-      .catch((error) => {
-        (speechNotes.get(key) || []).forEach((current) => {
-          if (current.isConnected) current.textContent = error.message || "修正版录音没准备好。";
-        });
-      })
-      .finally(() => speechJobs.delete(key));
   }
 
   function recordingPlayer(src, durationMs) {
@@ -685,34 +859,45 @@
     return box;
   }
 
-  function appendHistory(parent, runs) {
-    (runs || []).forEach((run) => {
-      const details = document.createElement("details");
-      details.className = "echoes";
-      const summary = document.createElement("summary");
-      const stats = run.stats || {};
-      const when = formatWhen(run.finished_at);
-      summary.textContent = `${when} · 原始 ${stats.raw} · 平均 ${stats.average} · ${stats.count} 题`;
-      details.appendChild(summary);
-      (run.answers || []).forEach((item) => details.appendChild(answerCard(run, item)));
-      parent.appendChild(details);
-    });
+  function historyRuns(runs) {
+    return (runs || []).slice().reverse();
   }
 
-  function renderStats(page, onBack) {
+  function runSummaryText(run) {
+    const stats = (run && run.stats) || {};
+    const when = formatWhen(run && run.finished_at);
+    return `${when} · 原始 ${stats.raw} · 平均 ${stats.average} · ${stats.count} 题`;
+  }
+
+  function appendHistory(parent, runs) {
+    const list = historyRuns(runs);
+    if (!list.length) return;
+    const box = document.createElement("section");
+    box.className = "progress-history";
+    const title = document.createElement("p");
+    title.className = "kicker";
+    title.textContent = "历史记录";
+    box.appendChild(title);
+    list.forEach((run) => {
+      const buttonEl = document.createElement("button");
+      buttonEl.type = "button";
+      buttonEl.className = "history-item progress-history-item";
+      buttonEl.dataset.progressRun = run.id || "";
+      const line = document.createElement("strong");
+      line.textContent = runSummaryText(run);
+      buttonEl.appendChild(line);
+      box.appendChild(buttonEl);
+    });
+    parent.appendChild(box);
+  }
+
+  function renderStats(page) {
     if (!statsRoot) return;
     releaseCharts(statsRoot);
     statsRoot.replaceChildren();
     const question = (page && page.question) || {};
     const head = document.createElement("section");
     head.className = "card";
-    const back = document.createElement("button");
-    back.type = "button";
-    back.className = "text-btn progress-back";
-    back.textContent = "返回题目";
-    back.addEventListener("click", () => {
-      if (onBack) onBack();
-    });
     const runs = (page && page.runs) || [];
     const kicker = document.createElement("p");
     kicker.className = "kicker";
@@ -721,7 +906,7 @@
     count.className = "progress-count";
     count.textContent = String(runs.length);
     kicker.append(count);
-    head.append(back, kicker);
+    head.appendChild(kicker);
     if ((question.en || "").trim()) {
       const en = document.createElement("p");
       en.className = "en-line";
@@ -744,6 +929,47 @@
     }
     statsRoot.appendChild(head);
     appendHistory(statsRoot, runs);
+  }
+
+  function renderRun(page, run) {
+    const runRoot = document.getElementById("progress-run-root");
+    if (!runRoot) return;
+    releaseCharts(runRoot);
+    runRoot.replaceChildren();
+    const question = (page && page.question) || {};
+    const head = document.createElement("section");
+    head.className = "card";
+    const kicker = document.createElement("p");
+    kicker.className = "kicker";
+    kicker.textContent = "这次进展";
+    head.appendChild(kicker);
+    if ((question.en || "").trim()) {
+      const en = document.createElement("p");
+      en.className = "en-line";
+      en.textContent = question.en;
+      head.appendChild(en);
+    }
+    if ((question.zh || "").trim()) {
+      const zh = document.createElement("p");
+      zh.className = "zh-line";
+      zh.textContent = question.zh;
+      head.appendChild(zh);
+    }
+    if (run) {
+      const summary = document.createElement("p");
+      summary.className = "note";
+      summary.textContent = runSummaryText(run);
+      head.appendChild(summary);
+    }
+    runRoot.appendChild(head);
+    if (!run) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "找不到这次记录。";
+      runRoot.appendChild(empty);
+      return;
+    }
+    (run.answers || []).forEach((item) => runRoot.appendChild(answerCard(run, item)));
   }
 
   function recordingBlock() {
@@ -948,6 +1174,24 @@
     }
   }
 
+  function bindRunClicks(el) {
+    if (!el) return;
+    el.addEventListener("click", async (event) => {
+      const runBtn = event.target.closest("[data-progress-run]");
+      if (!runBtn || !openRun) return;
+      const runId = runBtn.dataset.progressRun || "";
+      if (!runId || !questionId) return;
+      try {
+        await openRun(questionId, runId);
+      } catch (error) {
+        if (report) report(error.message);
+      }
+    });
+  }
+
+  bindRunClicks(root);
+  bindRunClicks(statsRoot);
+
   if (root) {
     root.addEventListener("submit", (event) => {
       const form = event.target.closest("[data-draft-form]");
@@ -957,6 +1201,7 @@
       saveDraft(input ? input.value : "");
     });
     root.addEventListener("click", (event) => {
+      if (event.target.closest("[data-progress-run]")) return;
       const target = event.target.closest("[data-progress-action]");
       if (!target || target.disabled) return;
       const action = target.dataset.progressAction;
@@ -1010,10 +1255,11 @@
     questionId() {
       return questionId;
     },
-    async show(request, notify, id, done) {
+    async show(request, notify, id, done, onOpenRun) {
       const same = id === questionId && view;
       api = request;
       report = notify;
+      openRun = typeof onOpenRun === "function" ? onOpenRun : null;
       afterFinish = typeof done === "function" ? done : null;
       if (id !== questionId) {
         generation += 1;
@@ -1065,9 +1311,13 @@
     leave() {
       if (recording) stop();
     },
-    async showStats(request, notify, id, onBack) {
+    async showStats(request, notify, id, onBack, onOpenRun) {
+      api = request;
+      report = notify;
+      openRun = typeof onOpenRun === "function" ? onOpenRun : null;
+      questionId = id || "";
       if (!id) {
-        renderStats(null, onBack);
+        renderStats(null);
         return;
       }
       if (statsRoot) {
@@ -1079,10 +1329,36 @@
       }
       try {
         const page = await request(`/api/questions/${encodeURIComponent(id)}/progress`);
-        renderStats(page, onBack);
+        renderStats(page);
         if (notify) notify("");
       } catch (error) {
         if (notify) notify(error.message);
+      }
+    },
+    async showRun(request, notify, id, runId) {
+      api = request;
+      report = notify;
+      questionId = id || "";
+      const runRoot = document.getElementById("progress-run-root");
+      if (runRoot) {
+        runRoot.replaceChildren();
+        const waiting = document.createElement("p");
+        waiting.className = "note";
+        waiting.textContent = "正在读取…";
+        runRoot.appendChild(waiting);
+      }
+      if (!id || !runId) {
+        renderRun(null, null);
+        return;
+      }
+      try {
+        const page = await request(`/api/questions/${encodeURIComponent(id)}/progress`);
+        const run = (page.runs || []).find((item) => item.id === runId) || null;
+        renderRun(page, run);
+        if (notify) notify("");
+      } catch (error) {
+        if (notify) notify(error.message);
+        renderRun(null, null);
       }
     },
   };

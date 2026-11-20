@@ -16,6 +16,7 @@ from app.gemini_client import (
     gloss_from_core_response,
     note_from_core_response,
     parse_feedback,
+    parse_json_object,
     parse_progress_score,
 )
 from app.prompts import (
@@ -285,6 +286,23 @@ class QwenClient:
             text = str(((choices[0] or {}).get("message") or {}).get("content") or "").strip()
         return note_from_core_response(text)
 
+    def json_object(self, prompt: str, *, temperature: float = 0.7) -> dict:
+        payload = self._post(
+            chat_url(self.base_url),
+            {
+                "model": self.feedback_model,
+                "temperature": temperature,
+                "enable_thinking": False,
+                "response_format": {"type": "json_object"},
+                "messages": [{"role": "user", "content": prompt}],
+            },
+        )
+        choices = payload.get("choices") or []
+        text = ""
+        if choices:
+            text = str(((choices[0] or {}).get("message") or {}).get("content") or "").strip()
+        return parse_json_object(text)
+
     def progress_score(
         self,
         *,
@@ -423,14 +441,19 @@ class QwenClient:
             raise ModelError("没有可以朗读的修正版。")
         if len(spoken) > 600:
             spoken = spoken[:600].rsplit(" ", 1)[0]
+        voice = (self.tts_voice or "").strip() or "Betty_v3.1"
+        # Qwen-Audio-TTS 英文精品音色是 Betty_v3.1 这种写法。
+        if voice.isalpha() and not voice.endswith("_v3.1"):
+            voice = f"{voice}_v3.1"
         payload = self._post(
-            self.base_url + "/services/aigc/multimodal-generation/generation",
+            self.base_url + "/services/audio/tts/SpeechSynthesizer",
             {
                 "model": self.tts_model,
                 "input": {
                     "text": spoken,
-                    "voice": self.tts_voice,
-                    "language_type": "English",
+                    "voice": voice,
+                    "format": "wav",
+                    "sample_rate": 24000,
                 },
             },
         )

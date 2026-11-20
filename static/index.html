@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Quickback</title>
-    <link rel="stylesheet" href="/static/app.css?v=112">
+    <link rel="stylesheet" href="/static/app.css?v=133">
 </head>
 <body>
   <div class="page">
@@ -23,9 +23,9 @@
       </div>
       <nav class="tabs" aria-label="页面">
         <a href="/practice" id="tab-practice" class="tab is-active" aria-current="page">练习</a>
-        <a href="/history" id="tab-history" class="tab">记录</a>
         <a href="/questions" id="tab-questions" class="tab">题目</a>
-        <a href="/progress" id="tab-progress" class="tab">进展</a>
+        <a href="/tasks" id="tab-tasks" class="tab">任务</a>
+        <a href="/progresses" id="tab-progresses" class="tab">进展统计</a>
         <a href="/memos" id="tab-memos" class="tab">备忘</a>
       </nav>
     </header>
@@ -56,31 +56,86 @@
     </main>
 
     <main id="history" hidden>
+      <div class="memo-toolbar">
+        <button type="button" id="history-back" class="text-btn">← 题目</button>
+      </div>
       <section id="history-list" class="history"></section>
     </main>
 
     <main id="questions" hidden>
       <div class="memo-toolbar">
         <button type="button" id="question-open-form" class="primary memo-open-form">＋ 添加</button>
+        <button type="button" id="question-open-ielts" class="question-ielts-gen">雅思口语123</button>
+        <button type="button" id="question-open-history" class="question-ielts-gen">记录</button>
       </div>
       <form id="question-form" class="card question-form" hidden>
         <p class="kicker">新题目</p>
         <label>英文问题<input name="en" type="text" required maxlength="240"></label>
         <label>中文意思<input name="zh" type="text" required maxlength="240"></label>
+        <label>类别
+          <input name="category" type="text" maxlength="20" placeholder="可空，点选或自行输入" autocomplete="off">
+        </label>
+        <div class="question-category-picks" id="question-category-picks"></div>
         <div class="memo-form-actions">
           <button type="submit" class="primary">保存</button>
-          <button type="button" id="question-close-form" class="text-btn">取消</button>
         </div>
       </form>
-      <section id="question-list" class="question-list"></section>
+      <section id="question-ielts-panel" class="question-ielts-panel" hidden>
+        <div class="question-ielts-head">
+          <div>
+            <p class="kicker">雅思口语123</p>
+            <p class="question-ielts-note">本批先预览，不进入练习。满意后点「加入已有题目」。</p>
+          </div>
+          <div class="question-ielts-actions">
+            <button type="button" id="question-ielts-gen" class="question-ielts-gen">生成口语123</button>
+          </div>
+        </div>
+        <div id="question-ielts-list" class="question-list question-ielts-list"></div>
+        <div class="question-ielts-footer" id="question-ielts-footer" hidden>
+          <button type="button" id="question-ielts-reshuffle" class="question-ielts-gen">换一批</button>
+          <button type="button" id="question-ielts-commit" class="question-ielts-gen question-ielts-commit">加入已有题目</button>
+        </div>
+      </section>
+      <div class="question-library-head">
+        <p class="question-library-label">已有题目</p>
+        <div class="question-filter" id="question-closed-filter" role="group" aria-label="归档筛选">
+          <button type="button" data-closed-filter="all" class="is-on">全部</button>
+          <button type="button" data-closed-filter="open">未归档</button>
+          <button type="button" data-closed-filter="closed">归档</button>
+        </div>
+      </div>
+      <section id="question-board" class="question-board">
+        <section id="question-list" class="question-list"></section>
+      </section>
     </main>
 
     <main id="progress" hidden>
+      <div class="memo-toolbar">
+        <button type="button" id="progress-back" class="text-btn">← 题目</button>
+      </div>
       <section id="progress-root"></section>
     </main>
 
     <main id="progress-stats" hidden>
+      <div class="memo-toolbar">
+        <button type="button" id="progress-stats-back" class="text-btn">← 题目</button>
+      </div>
       <section id="progress-stats-root"></section>
+    </main>
+
+    <main id="progress-run" hidden>
+      <div class="memo-toolbar">
+        <button type="button" id="progress-run-back" class="text-btn">← 返回</button>
+      </div>
+      <section id="progress-run-root"></section>
+    </main>
+
+    <main id="progresses" hidden>
+      <section id="progresses-root"></section>
+    </main>
+
+    <main id="tasks" hidden>
+      <section id="tasks-root"></section>
     </main>
 
     <main id="memos" hidden>
@@ -98,7 +153,6 @@
         <p id="memo-file-hint" class="note memo-file-hint">可选文件、音频、视频、文档或电子书，最多 8 个。</p>
         <div class="memo-form-actions">
           <button type="submit" class="primary">保存</button>
-          <button type="button" id="memo-close-form" class="text-btn">取消</button>
         </div>
       </form>
       <section id="memo-list" class="memo-list"></section>
@@ -109,6 +163,7 @@
       <p class="cert-install"><a href="/api/cert">下载手机证书</a>安装后，再到证书信任设置里打开完全信任。</p>
     </footer>
   </div>
+  <div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
   <div id="confirm-dialog" class="confirm" hidden>
     <div class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="confirm-text">
       <p id="confirm-text"></p>
@@ -153,9 +208,11 @@
     </div>
   </div>
   <script src="/static/chart.umd.min.js?v=4.4.6"></script>
-  <script src="/static/progress.js?v=31"></script>
-  <script src="/static/questions.js?v=40"></script>
-  <script src="/static/memos.js?v=29"></script>
-  <script src="/static/app.js?v=74"></script>
+  <script src="/static/progress.js?v=37"></script>
+  <script src="/static/progresses.js?v=5"></script>
+  <script src="/static/questions.js?v=63"></script>
+  <script src="/static/tasks.js?v=3"></script>
+  <script src="/static/memos.js?v=30"></script>
+  <script src="/static/app.js?v=86"></script>
 </body>
 </html>

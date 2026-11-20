@@ -25,13 +25,20 @@ from app.practice import PracticeStore
 from app.progress import ProgressStore
 from app.providers import CHOICES, providers
 from app.qwen_client import QwenClient
+from app.prompts import build_ielts_part_prompt, build_ielts_speaking_prompt
+from app.tasks import TaskError, TaskStore
 from app.questions import (
+    IELTS_PART_CATEGORY,
     QuestionError,
     backfill_timestamps,
     create_question,
+    create_questions,
     delete_question,
     get_question,
+    load_questions,
     next_question,
+    parse_ielts_part,
+    parse_ielts_speaking,
     update_question,
 )
 from app.segments import split_transcript
@@ -71,6 +78,7 @@ app = FastAPI(title="Quickback")
 store = SessionStore(settings.data_dir)
 practice = PracticeStore()
 progress = ProgressStore(settings.data_dir.parent / "progress")
+tasks = TaskStore(settings.data_dir.parent / "tasks.json")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
@@ -100,9 +108,11 @@ def _provider_view() -> dict:
     }
 
 
-def _client() -> GeminiClient | QwenClient:
-    name = providers.read()
-    if name == "qwen":
+def _client(name: str | None = None) -> GeminiClient | QwenClient:
+    chosen = str(name or "").strip().lower() or providers.read()
+    if chosen not in CHOICES:
+        raise ModelError("不支持这个模型。")
+    if chosen == "qwen":
         if not settings.qwen_api_key:
             raise ModelError("还没有填写千问 Key。写进 .env 的 DASHSCOPE_API_KEY，保存后重启。")
         return QwenClient(
@@ -124,6 +134,15 @@ def _client() -> GeminiClient | QwenClient:
     )
 
 
+def _speech_options(payload: dict | None) -> tuple[bool, str]:
+    data = payload if isinstance(payload, dict) else {}
+    force = bool(data.get("force"))
+    name = str(data.get("provider") or "").strip().lower()
+    if name and name not in CHOICES:
+        raise HTTPException(status_code=400, detail="不支持这个模型。")
+    return force, name or providers.read()
+
+
 def _blank(value: str | None) -> str | None:
     if value is None:
         return None
@@ -131,7 +150,7 @@ def _blank(value: str | None) -> str | None:
     return value or None
 
 
-_PAGES = {"practice", "history", "questions", "progress", "memos"}
+_PAGES = {"practice", "history", "questions", "progress", "progresses", "tasks", "memos"}
 
 
 def _page():
@@ -145,6 +164,11 @@ def index():
 
 @app.get("/progress/stats")
 def progress_stats_page():
+    return _page()
+
+
+@app.get("/progress/run")
+def progress_run_page():
     return _page()
 
 
@@ -333,15 +357,69 @@ def questions_list():
 @app.post("/api/questions")
 def questions_create(payload: dict):
     try:
-        return create_question(payload.get("en"), payload.get("zh"))
+        return create_question(
+            payload.get("en"),
+            payload.get("zh"),
+            category=payload.get("category") or "",
+        )
     except QuestionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _purge_question(question_id: str) -> None:
+    delete_question(question_id)
+    store.delete_for_question(question_id)
+    practice.forget_question(question_id)
+    progress.delete_question(question_id)
+
+
+@app.post("/api/questions/ielts-speaking")
+def questions_ielts_speaking(payload: dict | None = None):
+    body = payload or {}
+    part = str(body.get("part") or "").strip()
+    replace_ids = []
+    for item in body.get("replace_ids") or []:
+        qid = str(item or "").strip()
+        if qid and qid not in replace_ids:
+            replace_ids.append(qid)
+    replace_id = str(body.get("replace_id") or "").strip()
+    if replace_id and replace_id not in replace_ids:
+        replace_ids.append(replace_id)
+    try:
+        existing = [item["en"] for item in load_questions()]
+        if part:
+            if part not in IELTS_PART_CATEGORY:
+                raise QuestionError("只能刷新口语1、口语2或口语3。")
+            raw = _client().json_object(build_ielts_part_prompt(part, existing), temperature=0.8)
+            made = create_questions([parse_ielts_part(raw, part)])
+        else:
+            raw = _client().json_object(build_ielts_speaking_prompt(existing), temperature=0.8)
+            made = create_questions(parse_ielts_speaking(raw))
+        kept = {item["id"] for item in made}
+        for qid in replace_ids:
+            if qid in kept:
+                continue
+            try:
+                _purge_question(qid)
+            except QuestionError:
+                continue
+    except QuestionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ModelError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return made
 
 
 @app.put("/api/questions/{question_id}")
 def questions_update(question_id: str, payload: dict):
     try:
-        return update_question(question_id, payload.get("en"), payload.get("zh"))
+        category = payload["category"] if "category" in payload else None
+        return update_question(
+            question_id,
+            payload.get("en"),
+            payload.get("zh"),
+            category=category,
+        )
     except QuestionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -349,12 +427,9 @@ def questions_update(question_id: str, payload: dict):
 @app.delete("/api/questions/{question_id}")
 def questions_remove(question_id: str):
     try:
-        delete_question(question_id)
+        _purge_question(question_id)
     except QuestionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    store.delete_for_question(question_id)
-    practice.forget_question(question_id)
-    progress.delete_question(question_id)
     return {"ok": True}
 
 
@@ -392,15 +467,32 @@ def _attach_corrected_speech(page: dict, question_id: str) -> dict:
         for answer in run.get("answers") or []:
             if not isinstance(answer, dict):
                 continue
+            number = int(answer.get("number") or 0)
+            run_id = str(run.get("id") or "")
+            native = str(answer.get("native") or "").strip()
+            native_zh = str(answer.get("native_zh") or "").strip()
+            if native or native_zh:
+                has_native = bool(answer.get("has_native"))
+                answer["native_speech"] = {
+                    "natural": native,
+                    "natural_zh": native_zh,
+                    "has_speech": has_native,
+                    "run_id": run_id,
+                    "number": number,
+                    "speech_provider": str(answer.get("native_provider") or ""),
+                    "audio_url": f"/api/progress/{run_id}/native/{number}" if has_native and run_id else "",
+                }
             own = str(answer.get("natural") or "").strip()
             if own:
-                number = int(answer.get("number") or 0)
                 has_speech = bool(answer.get("has_corrected"))
                 answer["corrected_speech"] = {
                     "natural": own,
                     "natural_zh": str(answer.get("natural_zh") or ""),
                     "has_speech": has_speech,
-                    "audio_url": f"/api/progress/{run.get('id')}/speech/{number}" if has_speech else "",
+                    "run_id": run_id,
+                    "number": number,
+                    "speech_provider": str(answer.get("corrected_provider") or ""),
+                    "audio_url": f"/api/progress/{run_id}/speech/{number}" if has_speech and run_id else "",
                 }
                 continue
             prompt = answer.get("prompt") if isinstance(answer.get("prompt"), dict) else {}
@@ -413,9 +505,45 @@ def _attach_corrected_speech(page: dict, question_id: str) -> dict:
                 "index": ref["index"],
                 "has_speech": has_speech,
                 "natural": str(ref.get("natural") or ""),
+                "speech_provider": str(ref.get("speech_provider") or ""),
                 "audio_url": f"/api/sessions/{ref['session_id']}/speech/{ref['index']}" if has_speech else "",
             }
     return page
+
+
+def _closed_questions() -> list[dict]:
+    states = store.latest_states()
+    found = []
+    for item in load_questions():
+        state = states.get(item["id"]) or {}
+        if not state.get("closed"):
+            continue
+        found.append(item)
+    return found
+
+
+@app.get("/api/tasks/today")
+def tasks_today():
+    return tasks.today(_closed_questions())
+
+
+@app.post("/api/tasks/{question_id}/complete")
+def tasks_complete(question_id: str, payload: dict | None = None):
+    body = payload or {}
+    try:
+        get_question(question_id)
+    except QuestionError as exc:
+        raise HTTPException(status_code=404, detail="没有这道题。") from exc
+    states = store.latest_states()
+    if not (states.get(question_id) or {}).get("closed"):
+        raise HTTPException(status_code=400, detail="只有归档题目才能记入任务。")
+    average = body.get("average")
+    grade = body.get("grade")
+    try:
+        tasks.ensure_card(question_id)
+        return tasks.complete(question_id, average=average, grade=grade)
+    except TaskError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/questions/{question_id}/progress")
@@ -561,6 +689,81 @@ def progress_corrected(run_id: str, number: int):
     return FileResponse(path, media_type="audio/wav", headers={"Cache-Control": "no-cache"})
 
 
+@app.post("/api/progress/{run_id}/speech/{number}")
+async def progress_create_speech(run_id: str, number: int, payload: dict | None = None):
+    import asyncio
+
+    force, provider = _speech_options(payload)
+    async with _turn_speech_lock(run_id, number, "progress"):
+        try:
+            question_id = progress.question_id_for(run_id)
+            natural = progress.corrected_text(run_id, number)
+        except NotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except StorageError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not force:
+            try:
+                progress.corrected_path(run_id, number)
+                return _progress_question_page(question_id)
+            except NotFound:
+                pass
+        if not natural:
+            raise HTTPException(status_code=400, detail="这题还没有修正版文字。")
+        try:
+            spoken = await asyncio.to_thread(_client(provider).speak, natural)
+            progress.save_corrected(run_id, number, spoken, provider=provider)
+        except ModelError as exc:
+            log.info("progress speech %s/%s failed: %s", run_id, number, exc)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except (NotFound, StorageError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        log.info("progress speech %s/%s saved %s bytes via %s", run_id, number, len(spoken), provider)
+        return _progress_question_page(question_id)
+
+
+@app.get("/api/progress/{run_id}/native/{number}")
+def progress_native(run_id: str, number: int):
+    try:
+        path = progress.native_path(run_id, number)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这段地道版。") from exc
+    return FileResponse(path, media_type="audio/wav", headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/progress/{run_id}/native/{number}")
+async def progress_create_native(run_id: str, number: int, payload: dict | None = None):
+    import asyncio
+
+    force, provider = _speech_options(payload)
+    async with _turn_speech_lock(run_id, number, "native"):
+        try:
+            question_id = progress.question_id_for(run_id)
+            text = progress.native_text(run_id, number)
+        except NotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except StorageError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not force:
+            try:
+                progress.native_path(run_id, number)
+                return _progress_question_page(question_id)
+            except NotFound:
+                pass
+        if not text:
+            raise HTTPException(status_code=400, detail="这题还没有地道版文字。")
+        try:
+            spoken = await asyncio.to_thread(_client(provider).speak, text)
+            progress.save_native(run_id, number, spoken, provider=provider)
+        except ModelError as exc:
+            log.info("progress native %s/%s failed: %s", run_id, number, exc)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except (NotFound, StorageError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        log.info("progress native %s/%s saved %s bytes via %s", run_id, number, len(spoken), provider)
+        return _progress_question_page(question_id)
+
+
 @app.get("/api/progress/{run_id}/audio/{number}")
 def progress_audio(run_id: str, number: int, request: Request):
     try:
@@ -609,13 +812,6 @@ async def _score_progress(run_id: str, question_id: str) -> dict:
             reference_mime=(ref or {}).get("mime") or "audio/wav",
         )
         progress.commit_answer(run_id, transcript, parsed)
-        natural = str(parsed.get("natural") or "").strip()
-        if natural:
-            try:
-                spoken = await asyncio.to_thread(client.speak, natural)
-                progress.save_corrected(run_id, int(ctx["number"]), spoken)
-            except (ModelError, NotFound, StorageError) as exc:
-                log.info("progress %s corrected speech skipped: %s", run_id, exc)
     except ModelError as exc:
         log.info("progress %s failed: %s", run_id, exc)
         try:
@@ -796,16 +992,18 @@ def session_clear_follow_up(session_id: str):
 
 
 @app.post("/api/sessions/{session_id}/turns/{index}/speech")
-async def create_speech(session_id: str, index: int):
+async def create_speech(session_id: str, index: int, payload: dict | None = None):
     import asyncio
 
+    force, provider = _speech_options(payload)
     async with _turn_speech_lock(session_id, index):
-        try:
-            saved = store.keep_existing_speech(session_id, index)
-        except NotFound as exc:
-            raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
-        if saved is not None:
-            return saved
+        if not force:
+            try:
+                saved = store.keep_existing_speech(session_id, index)
+            except NotFound as exc:
+                raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+            if saved is not None:
+                return saved
         try:
             session = store.get(session_id)
             turn = next(item for item in session["turns"] if item["index"] == index)
@@ -815,7 +1013,7 @@ async def create_speech(session_id: str, index: int):
         if not natural:
             raise HTTPException(status_code=400, detail="还没有修正版，不能生成发音。")
         try:
-            client = _client()
+            client = _client(provider)
         except ModelError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
@@ -825,23 +1023,25 @@ async def create_speech(session_id: str, index: int):
             detail = str(exc).replace("录音已留下，可以点重试。", "稍后再打开这条记录。")
             detail = detail.replace("录音已留下，过一会儿点重试。", "稍后再打开这条记录。")
             raise HTTPException(status_code=502, detail=detail) from exc
-        log.info("speech %s/%s saved %s bytes", session_id, index, len(audio))
-        return store.save_speech(session_id, index, audio, natural)
+        log.info("speech %s/%s saved %s bytes via %s", session_id, index, len(audio), provider)
+        return store.save_speech(session_id, index, audio, natural, provider=provider)
 
 
 @app.post("/api/sessions/{session_id}/turns/{index}/speech/{level}")
-async def create_variant_speech(session_id: str, index: int, level: str):
+async def create_variant_speech(session_id: str, index: int, level: str, payload: dict | None = None):
     import asyncio
 
+    force, provider = _speech_options(payload)
     async with _turn_speech_lock(session_id, index, level):
-        try:
-            saved = store.keep_existing_variant_speech(session_id, index, level)
-        except NotFound as exc:
-            raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
-        except StorageError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if saved is not None:
-            return saved
+        if not force:
+            try:
+                saved = store.keep_existing_variant_speech(session_id, index, level)
+            except NotFound as exc:
+                raise HTTPException(status_code=404, detail="找不到这段录音。") from exc
+            except StorageError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if saved is not None:
+                return saved
         try:
             session = store.get(session_id)
             turn = next(item for item in session["turns"] if item["index"] == index)
@@ -859,7 +1059,7 @@ async def create_variant_speech(session_id: str, index: int, level: str):
         if not text:
             raise HTTPException(status_code=400, detail="还没有这句表达，不能生成发音。")
         try:
-            client = _client()
+            client = _client(provider)
         except ModelError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
@@ -869,8 +1069,8 @@ async def create_variant_speech(session_id: str, index: int, level: str):
             detail = str(exc).replace("录音已留下，可以点重试。", "稍后再打开这条记录。")
             detail = detail.replace("录音已留下，过一会儿点重试。", "稍后再打开这条记录。")
             raise HTTPException(status_code=502, detail=detail) from exc
-        log.info("speech %s/%s/%s saved %s bytes", session_id, index, level, len(audio))
-        return store.save_variant_speech(session_id, index, level, audio, text)
+        log.info("speech %s/%s/%s saved %s bytes via %s", session_id, index, level, len(audio), provider)
+        return store.save_variant_speech(session_id, index, level, audio, text, provider=provider)
 
 
 @app.get("/api/sessions/{session_id}/speech/{index}/{level}")

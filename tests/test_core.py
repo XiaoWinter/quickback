@@ -12,15 +12,17 @@ from app.gemini_client import (
 )
 from app.practice import PracticeStore
 from app.providers import ProviderStore
-from app.prompts import build_core_note_prompt, build_feedback_prompt
+from app.prompts import build_core_note_prompt, build_feedback_prompt, build_ielts_speaking_prompt
 from app.qwen_client import audio_url_from_qwen, chat_url, contains_cjk, to_simplified, transcript_from_qwen, usable_audio_url
 from app.questions import (
     QuestionError,
     backfill_timestamps,
     create_question,
+    create_questions,
     delete_question,
     load_questions,
     next_question,
+    parse_ielts_speaking,
     update_question,
 )
 from app.segments import split_transcript
@@ -831,12 +833,13 @@ class QuestionTests(unittest.TestCase):
             path.write_text('[{"id":"only-one","en":"Only one?","zh":"只剩一道？"}]\n', encoding="utf-8")
             with self.assertRaises(QuestionError):
                 delete_question("only-one", path)
-            created = create_question("What season do you like?", "你喜欢哪个季节？", path)
+            created = create_question("What season do you like?", "你喜欢哪个季节？", path=path)
             self.assertEqual(created["id"], "what-season-do-you-like")
+            self.assertEqual(created["category"], "")
             self.assertEqual(load_questions(path)[0]["id"], created["id"])
             self.assertTrue(created["created_at"])
             self.assertEqual(created["created_at"], created["updated_at"])
-            updated = update_question(created["id"], created["en"], "你最喜欢什么季节？", path)
+            updated = update_question(created["id"], created["en"], "你最喜欢什么季节？", path=path)
             self.assertEqual(updated["zh"], "你最喜欢什么季节？")
             self.assertEqual(updated["created_at"], created["created_at"])
             self.assertNotEqual(updated["updated_at"], "")
@@ -846,6 +849,56 @@ class QuestionTests(unittest.TestCase):
             kept = load_questions(path)[0]
             self.assertTrue(kept["created_at"])
             self.assertTrue(kept["updated_at"])
+
+    def test_legacy_questions_default_empty_category(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "questions.json"
+            path.write_text('[{"id":"old","en":"Old?","zh":"旧题？"}]\n', encoding="utf-8")
+            loaded = load_questions(path)
+            self.assertEqual(loaded[0]["category"], "")
+
+    def test_category_can_be_created_and_updated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "questions.json"
+            path.write_text('[{"id":"seed","en":"Seed?","zh":"种子？"}]\n', encoding="utf-8")
+            created = create_question("Do you cook?", "你做饭吗？", category="口语1", path=path)
+            self.assertEqual(created["category"], "口语1")
+            updated = update_question(
+                created["id"],
+                created["en"],
+                created["zh"],
+                category="口语2",
+                path=path,
+            )
+            self.assertEqual(updated["category"], "口语2")
+            cleared = update_question(
+                created["id"],
+                created["en"],
+                created["zh"],
+                category="",
+                path=path,
+            )
+            self.assertEqual(cleared["category"], "")
+
+    def test_parse_ielts_speaking_tags_parts(self):
+        made = parse_ielts_speaking(
+            {
+                "part1": {"en": "Do you like music?", "zh": "你喜欢音乐吗？"},
+                "part2": {"en": "Describe a song you like.", "zh": "描述一首你喜欢的歌。"},
+                "part3": {"en": "How does music affect people?", "zh": "音乐如何影响人们？"},
+            }
+        )
+        self.assertEqual([item["category"] for item in made], ["口语1", "口语2", "口语3"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "questions.json"
+            path.write_text('[{"id":"seed","en":"Seed?","zh":"种子？"}]\n', encoding="utf-8")
+            saved = create_questions(made, path=path)
+            self.assertEqual([item["category"] for item in saved], ["口语1", "口语2", "口语3"])
+        prompt = build_ielts_speaking_prompt(["Do you like music?"])
+        self.assertIn("Do you like music?", prompt)
+        self.assertIn("part1", prompt)
+        with self.assertRaises(QuestionError):
+            parse_ielts_speaking({"part1": {"en": "x", "zh": "一"}})
 
     def test_backfill_adds_missing_times_once(self):
         with tempfile.TemporaryDirectory() as tmp:

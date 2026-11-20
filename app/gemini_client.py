@@ -15,6 +15,17 @@ from app.prompts import (
     build_progress_prompt,
 )
 
+
+def parse_json_object(text: str) -> dict:
+    raw = _FENCE.sub("", (text or "").strip()).strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ModelError("模型没有返回可用的 JSON。") from exc
+    if not isinstance(data, dict):
+        raise ModelError("模型返回的不是 JSON 对象。")
+    return data
+
 log = logging.getLogger("quickback")
 _FEEDBACK_FALLBACKS = ("gemini-3.6-flash", "gemini-3.5-flash-lite")
 
@@ -438,6 +449,13 @@ def parse_progress_score(text: str, transcript: str = "") -> dict:
     natural_zh = _clip_zh(zhconv.convert(str(data.get("natural_zh") or ""), "zh-cn"), 800)
     if not _ZH.search(natural_zh):
         natural_zh = ""
+    native = re.sub(r"[\u3400-\u9fff]+", " ", str(data.get("native") or ""))
+    native = " ".join(native.split())
+    if not re.search(r"[A-Za-z]", native):
+        native = ""
+    native_zh = _clip_zh(zhconv.convert(str(data.get("native_zh") or ""), "zh-cn"), 800)
+    if not _ZH.search(native_zh):
+        native_zh = ""
     return {
         "scores": scores,
         "notes": notes,
@@ -446,6 +464,8 @@ def parse_progress_score(text: str, transcript: str = "") -> dict:
         "follow_up_zh": follow_zh,
         "natural": natural[:800],
         "natural_zh": natural_zh,
+        "native": native[:800],
+        "native_zh": native_zh,
     }
 
 
@@ -771,6 +791,22 @@ class GeminiClient:
         except Exception as exc:
             raise GeminiError(_friendly(exc)) from exc
         return note_from_core_response(_response_text(response))
+
+    def json_object(self, prompt: str, *, temperature: float = 0.7) -> dict:
+        _genai, types = _sdk()
+        client = self._client_or_create()
+        try:
+            response = client.models.generate_content(
+                model=self.feedback_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=temperature,
+                    response_mime_type="application/json",
+                ),
+            )
+        except Exception as exc:
+            raise GeminiError(_friendly(exc)) from exc
+        return parse_json_object(_response_text(response))
 
     def progress_score(
         self,

@@ -24,10 +24,10 @@ class Settings:
     speech_voice = os.getenv("GEMINI_SPEECH_VOICE", "Kore").strip() or "Kore"
     qwen_api_key = os.getenv("DASHSCOPE_API_KEY", "").strip() or os.getenv("QWEN_API_KEY", "").strip()
     qwen_base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/api/v1").strip().rstrip("/")
-    qwen_feedback_model = os.getenv("QWEN_FEEDBACK_MODEL", "qwen-flash").strip() or "qwen-flash"
+    qwen_feedback_model = os.getenv("QWEN_FEEDBACK_MODEL", "qwen3.8-flash").strip() or "qwen3.8-flash"
     qwen_asr_model = os.getenv("QWEN_ASR_MODEL", "qwen3-asr-flash").strip() or "qwen3-asr-flash"
-    qwen_tts_model = os.getenv("QWEN_TTS_MODEL", "qwen3-tts-flash").strip() or "qwen3-tts-flash"
-    qwen_tts_voice = os.getenv("QWEN_TTS_VOICE", "Serena").strip() or "Serena"
+    qwen_tts_model = os.getenv("QWEN_TTS_MODEL", "qwen-audio-3.1-tts-flash").strip() or "qwen-audio-3.1-tts-flash"
+    qwen_tts_voice = os.getenv("QWEN_TTS_VOICE", "Betty_v3.1").strip() or "Betty_v3.1"
     data_dir = _data_dir()
     host = os.getenv("QUICKBACK_HOST", "0.0.0.0").strip() or "0.0.0.0"
     port = int(os.getenv("QUICKBACK_PORT", "8765"))

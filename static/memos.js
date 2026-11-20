@@ -23,7 +23,6 @@
   const videoFsHint = document.getElementById("memo-video-fs-hint");
   const addBtn = form ? form.querySelector('button[type="submit"]') : null;
   const openFormBtn = document.getElementById("memo-open-form");
-  const closeFormBtn = document.getElementById("memo-close-form");
   let videoFsHome = null;
   let videoFsPlayer = null;
   let videoFsHadControls = true;
@@ -617,10 +616,18 @@
     render(await api("/api/memos"));
   }
 
+  function syncMemoFormBtn() {
+    if (!openFormBtn) return;
+    const open = Boolean(form && !form.hidden);
+    openFormBtn.classList.toggle("is-active", open);
+    openFormBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    openFormBtn.setAttribute("aria-pressed", open ? "true" : "false");
+  }
+
   function openMemoForm() {
     if (!form) return;
     form.hidden = false;
-    if (openFormBtn) openFormBtn.hidden = true;
+    syncMemoFormBtn();
     form.querySelector('[name="title"]')?.focus();
   }
 
@@ -629,7 +636,16 @@
     form.hidden = true;
     form.reset();
     if (formPicker) formPicker.clear();
-    if (openFormBtn) openFormBtn.hidden = false;
+    syncMemoFormBtn();
+  }
+
+  function toggleMemoForm() {
+    if (!form || busy) return;
+    if (form.hidden) openMemoForm();
+    else {
+      closeMemoForm();
+      if (report) report("");
+    }
   }
 
   if (fileInput) {
@@ -638,14 +654,8 @@
   }
 
   if (openFormBtn) {
-    openFormBtn.addEventListener("click", () => openMemoForm());
-  }
-  if (closeFormBtn) {
-    closeFormBtn.addEventListener("click", () => {
-      if (busy) return;
-      closeMemoForm();
-      report("");
-    });
+    openFormBtn.addEventListener("click", () => toggleMemoForm());
+    syncMemoFormBtn();
   }
 
   if (form) {

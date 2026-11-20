@@ -3,6 +3,7 @@
     "id": "should-everyone-take-some-sort-of-furthe",
     "en": "Should everyone take some sort of further education?",
     "zh": "每个人都应该接受某种形式的进一步教育吗？",
+    "category": "",
     "created_at": "2026-11-11T07:37:42-08:00",
     "updated_at": "2026-11-11T07:37:42-08:00"
   },
@@ -10,6 +11,7 @@
     "id": "don-t-we-do-enough-to-protecet-the-envir",
     "en": "Don't we do enough to protecet the environment?",
     "zh": "我们在保护环境方面做得还不够吗？",
+    "category": "",
     "created_at": "2026-11-11T07:36:48-08:00",
     "updated_at": "2026-11-11T07:36:48-08:00"
   },
@@ -17,6 +19,7 @@
     "id": "will-robots-play-a-more-important-role-i",
     "en": "Will robots play a more important role in our lives in the future.",
     "zh": "机器人会在未来的生活中扮演更重要的角色吗？",
+    "category": "",
     "created_at": "2026-11-11T07:35:48-08:00",
     "updated_at": "2026-11-11T07:35:48-08:00"
   },
@@ -24,6 +27,7 @@
     "id": "should-people-be-made-to-retire-earlier",
     "en": "Should people be made to retire earlier so that younger people have a better chance of getting a job?",
     "zh": "是否应该让人们提前退休，以便年轻人有更好的机会找到工作？",
+    "category": "",
     "created_at": "2026-11-11T07:34:46-08:00",
     "updated_at": "2026-11-11T07:34:46-08:00"
   },
@@ -31,6 +35,7 @@
     "id": "are-vedio-games-in-general-a-lot-more-vi",
     "en": "Are vedio games in general a lot more violent nowadays?",
     "zh": "现在的电子游戏是否更加暴力？",
+    "category": "",
     "created_at": "2026-11-11T07:32:54-08:00",
     "updated_at": "2026-11-11T07:32:54-08:00"
   },
@@ -38,6 +43,7 @@
     "id": "do-you-think-newspapers-and-books-will-e",
     "en": "Do you think newspapers and books will eventually disappear?",
     "zh": "报纸和书籍最终会消失吗？",
+    "category": "",
     "created_at": "2026-11-11T07:22:33-08:00",
     "updated_at": "2026-11-11T07:22:33-08:00"
   },
@@ -45,6 +51,7 @@
     "id": "pollution-is-a-problem-in-many-countries",
     "en": "Pollution is a problem in many countries. What do you think government can do about it?",
     "zh": "污染在很多国家都是问题。关于污染政府能做什么？",
+    "category": "",
     "created_at": "2026-11-11T07:21:21-08:00",
     "updated_at": "2026-11-11T07:21:21-08:00"
   },
@@ -52,6 +59,7 @@
     "id": "do-you-think-the-government-should-try-t",
     "en": "Do you think the government should try to control the internet, or should people be able to write whatever they want?",
     "zh": "政府应该去控制互联网的言论，还是人们可以想说什么就说什么?",
+    "category": "",
     "created_at": "2026-11-11T07:19:52-08:00",
     "updated_at": "2026-11-11T07:19:52-08:00"
   },
@@ -59,6 +67,7 @@
     "id": "do-you-think-some-peope-spend-too-much-t",
     "en": "Do you think some peope spend too much time on their computers these days?",
     "zh": "今天人们花了太多时间在电脑前吗？",
+    "category": "",
     "created_at": "2026-11-11T07:17:44-08:00",
     "updated_at": "2026-11-11T07:17:44-08:00"
   },
@@ -66,6 +75,7 @@
     "id": "do-you-think-it-s-important-to-earn-a-la",
     "en": "Do you think  it's important to earn a large salary or to be happy in your job?",
     "zh": "你认为是挣钱重要还是开心重要？",
+    "category": "",
     "created_at": "2026-11-11T07:16:18-08:00",
     "updated_at": "2026-11-16T02:46:01-08:00"
   },
@@ -73,6 +83,7 @@
     "id": "describe-a-time-when-you-helped-someone",
     "en": "describe a time when you helped someone.(follow STAR)",
     "zh": "描述一次你帮助某人的经历.(遵照 STAR 法则)",
+    "category": "",
     "created_at": "2026-11-05T02:47:36-08:00",
     "updated_at": "2026-11-05T02:47:36-08:00"
   },
@@ -80,6 +91,7 @@
     "id": "have-you-always-liked-the-same-kind-of-m",
     "en": "Have you always liked the same kind of music?",
     "zh": "你总是喜欢同一种类型的音乐吗?",
+    "category": "",
     "created_at": "2026-11-05T00:15:24-08:00",
     "updated_at": "2026-11-05T00:15:24-08:00"
   },
@@ -87,6 +99,7 @@
     "id": "do-you-often-go-out-at-the-weekends",
     "en": "Do you often go out at the weekends?",
     "zh": "你经常周末出去吗？",
+    "category": "",
     "created_at": "2026-11-04T22:58:19-08:00",
     "updated_at": "2026-11-04T22:58:19-08:00"
   },
@@ -94,6 +107,7 @@
     "id": "what-animals-do-you-like",
     "en": "what animals do you like?",
     "zh": "你喜欢什么动物？",
+    "category": "",
     "created_at": "2026-11-04T03:40:37-08:00",
     "updated_at": "2026-11-04T03:40:37-08:00"
   },
@@ -101,6 +115,7 @@
     "id": "what-does-cheery-s-voice-sound-like",
     "en": "What does Cheery’s voice sound like?",
     "zh": "Cheery的声音是怎样的",
+    "category": "",
     "created_at": "2026-11-04T02:58:29-08:00",
     "updated_at": "2026-11-04T02:58:29-08:00"
   },
@@ -108,6 +123,7 @@
     "id": "what-would-you-like-to-do-any-further-st",
     "en": "what would you like to do any further study?",
     "zh": "你未来想学什么?",
+    "category": "",
     "created_at": "2026-11-04T01:34:47-08:00",
     "updated_at": "2026-11-04T01:34:47-08:00"
   },
@@ -115,6 +131,7 @@
     "id": "did-you-enjoy-studying-when-you-frist-st",
     "en": "Did you enjoy studying when you frist started school?",
     "zh": "你刚开始上学时，喜欢学习吗？",
+    "category": "",
     "created_at": "2026-11-04T00:53:03-08:00",
     "updated_at": "2026-11-04T00:53:03-08:00"
   },
@@ -122,6 +139,7 @@
     "id": "do-you-like-to-read-the-newspaper",
     "en": "Do you like to read the newspaper?",
     "zh": "你喜欢读报纸吗？",
+    "category": "",
     "created_at": "2026-11-03T19:19:14-08:00",
     "updated_at": "2026-11-03T19:26:16-08:00"
   },
@@ -129,6 +147,7 @@
     "id": "city-food",
     "en": "What food do you like in the city where you live?",
     "zh": "在你住的城市里，你喜欢吃什么？",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -136,6 +155,7 @@
     "id": "weekend-morning",
     "en": "What do you usually do on a weekend morning?",
     "zh": "周末早上你一般做什么？",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -143,6 +163,7 @@
     "id": "where-you-live",
     "en": "Describe the place you live in now.",
     "zh": "说说你现在住的地方。",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -150,6 +171,7 @@
     "id": "get-around",
     "en": "How do you usually get around your city?",
     "zh": "你在这座城市里一般怎么出门？",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -157,6 +179,7 @@
     "id": "yesterday-meal",
     "en": "What did you eat yesterday?",
     "zh": "你昨天吃了什么？",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -164,6 +187,7 @@
     "id": "a-shop",
     "en": "Talk about a shop or market you like in your city.",
     "zh": "说说你喜欢的一家店或一个市场。",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -171,6 +195,7 @@
     "id": "after-work",
     "en": "What do you usually do after work or study?",
     "zh": "下班或放学之后你一般做什么？",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -178,6 +203,7 @@
     "id": "weather",
     "en": "What weather do you like, and what do you do in it?",
     "zh": "你喜欢什么样的天气？那种天气里你会做什么？",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -185,6 +211,7 @@
     "id": "cook-for-friend",
     "en": "What would you cook for a friend, and why?",
     "zh": "你会给朋友做什么吃的？为什么？",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -192,6 +219,7 @@
     "id": "this-month",
     "en": "What do you want to do in your city this month?",
     "zh": "这个月你想在这座城市里做什么？",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -199,6 +227,7 @@
     "id": "neighborhood",
     "en": "What is your neighborhood like?",
     "zh": "你住的这一带是什么样的？",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -206,6 +235,7 @@
     "id": "morning-routine",
     "en": "Walk through a typical morning for you.",
     "zh": "按顺序说说你平常的早晨。",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -213,6 +243,7 @@
     "id": "a-drink",
     "en": "What do you like to drink, and when do you have it?",
     "zh": "你喜欢喝什么？一般什么时候喝？",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   },
@@ -220,6 +251,7 @@
     "id": "show-a-visitor",
     "en": "Describe a place in your city you would take a visitor.",
     "zh": "如果有人来找你，你会带对方去哪里？说说那个地方。",
+    "category": "",
     "created_at": "2026-11-03T07:33:27-08:00",
     "updated_at": "2026-11-03T07:33:27-08:00"
   }

@@ -2,6 +2,11 @@ const MAX_MS = 3 * 60 * 1000;
 
 const state = {
   hasKey: true,
+  provider: "gemini",
+  providers: [
+    { id: "gemini", label: "Gemini", has_key: false },
+    { id: "qwen", label: "千问", has_key: false },
+  ],
   session: null,
   question: null,
   recording: false,
@@ -68,6 +73,38 @@ function showBanner(text) {
   bannerEl.hidden = false;
   bannerEl.textContent = text;
 }
+
+const toastEl = document.getElementById("toast");
+let toastTimer = 0;
+
+function showToast(text, ms = 2400) {
+  if (!toastEl) return;
+  const message = String(text || "").trim();
+  if (!message) {
+    toastEl.hidden = true;
+    toastEl.classList.remove("is-on");
+    toastEl.textContent = "";
+    if (toastTimer) window.clearTimeout(toastTimer);
+    toastTimer = 0;
+    return;
+  }
+  if (toastTimer) window.clearTimeout(toastTimer);
+  toastEl.hidden = false;
+  toastEl.textContent = message;
+  toastEl.classList.remove("is-on");
+  void toastEl.offsetWidth;
+  toastEl.classList.add("is-on");
+  toastTimer = window.setTimeout(() => {
+    toastEl.classList.remove("is-on");
+    toastTimer = window.setTimeout(() => {
+      toastEl.hidden = true;
+      toastEl.textContent = "";
+      toastTimer = 0;
+    }, 200);
+  }, Math.max(1200, ms));
+}
+
+window.quickbackToast = showToast;
 
 async function api(path, options) {
   const response = await fetch(path, options);
@@ -318,11 +355,27 @@ function mediaFile(kind, turn, level) {
   return (item && item.retell_file) || "";
 }
 
+function speechProviderOf(turn, level) {
+  if (!level) return String(turn.speech_provider || "");
+  const item = ((turn.feedback || {}).variants || []).find((entry) => entry.key === level);
+  return String((item && item.speech_provider) || "");
+}
+
+function providerLabel(id) {
+  const found = (state.providers || []).find((item) => item.id === id);
+  if (found && found.label) return found.label;
+  if (id === "qwen") return "千问";
+  if (id === "gemini") return "Gemini";
+  return id || "";
+}
+
 function mediaSrc(kind, turn, level) {
   const file = mediaFile(kind, turn, level);
-  const version = encodeURIComponent(file || turn.created_at || "");
+  let version = file || turn.created_at || "";
+  if (kind === "speech") version = `${file || ""}:${speechProviderOf(turn, level)}`;
+  const encoded = encodeURIComponent(version);
   const tail = level ? `/${level}` : "";
-  const url = `/api/sessions/${state.session.id}/${kind}/${turn.index}${tail}?v=${version}`;
+  const url = `/api/sessions/${state.session.id}/${kind}/${turn.index}${tail}?v=${encoded}`;
   return kind === "speech" ? url : compatibleSrc(url);
 }
 
@@ -486,6 +539,35 @@ window.QuickbackPlayer = {
   compatibleSrc,
 };
 
+function requestSpeech(turn, level, text, provider, force) {
+  const sessionId = state.session.id;
+  const index = turn.index;
+  const key = level ? `${sessionId}:${index}:${level}` : `${sessionId}:${index}`;
+  const path = level
+    ? `/api/sessions/${sessionId}/turns/${index}/speech/${level}`
+    : `/api/sessions/${sessionId}/turns/${index}/speech`;
+  const body = { provider: provider || state.provider || "gemini" };
+  if (force) body.force = true;
+  return api(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then((session) => {
+    if (!state.session || state.session.id !== sessionId) return null;
+    const current = (session.turns || []).find((item) => item.index === index);
+    const feedback = (current && current.feedback) || {};
+    const still = level
+      ? ((((feedback.variants || []).find((item) => item.key === level)) || {}).en || "").trim()
+      : (feedback.natural || "").trim();
+    if (still !== text) return null;
+    state.session = session;
+    keptSpeech.add(key);
+    speechRequests.delete(key);
+    if (!state.recording) renderPractice();
+    return session;
+  });
+}
+
 function renderSpeech(parent, turn, options) {
   const level = (options && options.level) || "";
   const text = options && options.text != null
@@ -494,34 +576,73 @@ function renderSpeech(parent, turn, options) {
   const file = options && Object.prototype.hasOwnProperty.call(options, "file") ? options.file : turn.speech_file;
   const key = level ? `${state.session.id}:${turn.index}:${level}` : `${state.session.id}:${turn.index}`;
   if (file) keptSpeech.add(key);
+  const box = document.createElement("div");
+  box.className = "speech-block";
   if (file || keptSpeech.has(key)) {
-    parent.appendChild(window.QuickbackPlayer.create(mediaSrc("speech", turn, level), "metadata"));
+    box.appendChild(window.QuickbackPlayer.create(mediaSrc("speech", turn, level), "metadata"));
+    const meta = document.createElement("div");
+    meta.className = "speech-meta";
+    const who = speechProviderOf(turn, level);
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent = who ? `发音 · ${providerLabel(who)}` : "发音";
+    meta.appendChild(note);
+    const actions = document.createElement("div");
+    actions.className = "speech-actions";
+    (state.providers || []).forEach((item) => {
+      if (!item.has_key) return;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "text-btn";
+      btn.textContent = `用${item.label || providerLabel(item.id)}重录`;
+      btn.addEventListener("click", () => {
+        if (speechRequests.has(key)) return;
+        btn.disabled = true;
+        btn.textContent = "正在准备发音…";
+        speechRequests.set(key, true);
+        requestSpeech(turn, level, text, item.id, true).catch((error) => {
+          speechRequests.delete(key);
+          if (btn.isConnected) {
+            btn.disabled = false;
+            btn.textContent = error.message || "发音没准备好。";
+          }
+        });
+      });
+      actions.appendChild(btn);
+    });
+    if (actions.childElementCount) meta.appendChild(actions);
+    box.appendChild(meta);
+    parent.appendChild(box);
     return;
   }
-  const note = addLine(parent, "note", "正在准备发音…");
-  const sessionId = state.session.id;
-  const index = turn.index;
-  if (speechRequests.has(key)) return;
-  const path = level
-    ? `/api/sessions/${sessionId}/turns/${index}/speech/${level}`
-    : `/api/sessions/${sessionId}/turns/${index}/speech`;
-  const job = api(path, { method: "POST" })
-    .then((session) => {
-      if (!state.session || state.session.id !== sessionId) return;
-      const current = (state.session.turns || []).find((item) => item.index === index);
-      const feedback = (current && current.feedback) || {};
-      const still = level
-        ? ((((feedback.variants || []).find((item) => item.key === level)) || {}).en || "").trim()
-        : (feedback.natural || "").trim();
-      if (still !== text) return;
-      state.session = session;
-      if (!state.recording) renderPractice();
-    })
-    .catch((error) => {
+  if (!text || !state.session) return;
+  const listen = document.createElement("button");
+  listen.type = "button";
+  listen.className = "text-btn";
+  if (speechRequests.has(key)) {
+    listen.disabled = true;
+    listen.textContent = "正在准备发音…";
+    box.appendChild(listen);
+    parent.appendChild(box);
+    return;
+  }
+  const current = state.provider || "gemini";
+  listen.textContent = `听发音（${providerLabel(current)}）`;
+  listen.addEventListener("click", () => {
+    if (!state.session || speechRequests.has(key)) return;
+    listen.disabled = true;
+    listen.textContent = "正在准备发音…";
+    speechRequests.set(key, true);
+    requestSpeech(turn, level, text, current, false).catch((error) => {
       speechRequests.delete(key);
-      if (note.isConnected) note.textContent = error.message;
+      if (listen.isConnected) {
+        listen.disabled = false;
+        listen.textContent = error.message || "发音没准备好。";
+      }
     });
-  speechRequests.set(key, job);
+  });
+  box.appendChild(listen);
+  parent.appendChild(box);
 }
 
 function addMeaning(parent, text) {
@@ -1322,47 +1443,101 @@ async function finishPractice() {
 }
 
 let applyingRoute = false;
+let progressOrigin = "questions";
+let progressRunReturn = "progress-stats";
+let progressRunId = "";
 
-function pagePath(name, question) {
+function normalizeProgressOrigin(origin) {
+  if (origin === "tasks" || origin === "progresses") return origin;
+  return "questions";
+}
+
+function setProgressOrigin(origin) {
+  progressOrigin = normalizeProgressOrigin(origin);
+  const labels = {
+    tasks: "← 任务",
+    progresses: "← 进展统计",
+    questions: "← 题目",
+  };
+  const label = labels[progressOrigin] || labels.questions;
+  const back = document.getElementById("progress-back");
+  const statsBack = document.getElementById("progress-stats-back");
+  if (back) back.textContent = label;
+  if (statsBack) statsBack.textContent = label;
+}
+
+function setProgressRunReturn(fromView) {
+  progressRunReturn = fromView === "progress" ? "progress" : "progress-stats";
+  const runBack = document.getElementById("progress-run-back");
+  if (runBack) {
+    runBack.textContent = progressRunReturn === "progress" ? "← 进展" : "← 进展统计";
+  }
+}
+
+function pagePath(name, question, run) {
   const paths = {
     practice: "/practice",
     history: "/history",
     questions: "/questions",
     progress: "/progress",
     "progress-stats": "/progress/stats",
+    "progress-run": "/progress/run",
+    progresses: "/progresses",
+    tasks: "/tasks",
     memos: "/memos",
   };
   const path = paths[name] || "/practice";
+  if (name === "progress-run" && question && run) {
+    let url = `${path}?question=${encodeURIComponent(question)}&run=${encodeURIComponent(run)}`;
+    if (progressRunReturn === "progress") url += "&via=progress";
+    if (progressOrigin === "tasks" || progressOrigin === "progresses") {
+      url += `&from=${progressOrigin}`;
+    }
+    return url;
+  }
   if ((name === "progress" || name === "progress-stats") && question) {
-    return `${path}?question=${encodeURIComponent(question)}`;
+    let url = `${path}?question=${encodeURIComponent(question)}`;
+    if (progressOrigin === "tasks" || progressOrigin === "progresses") {
+      url += `&from=${progressOrigin}`;
+    }
+    return url;
   }
   return path;
 }
 
 function routeFromLocation() {
   const path = location.pathname.replace(/\/+$/, "") || "/";
-  const question = new URLSearchParams(location.search).get("question") || "";
-  if (path === "/history") return { name: "history", question: "" };
-  if (path === "/questions") return { name: "questions", question: "" };
-  if (path === "/memos") return { name: "memos", question: "" };
-  if (path === "/progress/stats") return { name: "progress-stats", question };
-  if (path === "/progress") return { name: "progress", question };
-  return { name: "practice", question: "" };
+  const params = new URLSearchParams(location.search);
+  const question = params.get("question") || "";
+  const run = params.get("run") || "";
+  const from = normalizeProgressOrigin(params.get("from"));
+  const via = params.get("via") === "progress" ? "progress" : "progress-stats";
+  if (path === "/history") return { name: "history", question: "", run: "", from: "questions", via: "progress-stats" };
+  if (path === "/questions") return { name: "questions", question: "", run: "", from: "questions", via: "progress-stats" };
+  if (path === "/progresses") return { name: "progresses", question: "", run: "", from: "questions", via: "progress-stats" };
+  if (path === "/memos") return { name: "memos", question: "", run: "", from: "questions", via: "progress-stats" };
+  if (path === "/tasks") return { name: "tasks", question: "", run: "", from: "questions", via: "progress-stats" };
+  if (path === "/progress/run") return { name: "progress-run", question, run, from, via };
+  if (path === "/progress/stats") return { name: "progress-stats", question, run: "", from, via: "progress-stats" };
+  if (path === "/progress") return { name: "progress", question, run: "", from, via: "progress-stats" };
+  return { name: "practice", question: "", run: "", from: "questions", via: "progress-stats" };
 }
 
-function rememberRoute(name, question) {
+function rememberRoute(name, question, run) {
   if (applyingRoute) return;
-  const url = pagePath(name, question || "");
-  const state = { name, question: question || "" };
+  const url = pagePath(name, question || "", run || "");
+  const state = {
+    name,
+    question: question || "",
+    run: run || "",
+    from:
+      name === "progress" || name === "progress-stats" || name === "progress-run"
+        ? progressOrigin
+        : "questions",
+    via: name === "progress-run" ? progressRunReturn : "progress-stats",
+  };
   if (location.pathname + location.search === url) history.replaceState(state, "", url);
   else history.pushState(state, "", url);
-  if (name === "progress" || name === "progress-stats") syncProgressHref(question || "");
-}
-
-function syncProgressHref(question) {
-  const link = document.getElementById("tab-progress");
-  if (!link) return;
-  link.href = question ? `/progress?question=${encodeURIComponent(question)}` : "/progress";
 }
 
 function followLink(event) {
@@ -1381,8 +1556,24 @@ function activate(tab) {
   if (progressEl) progressEl.hidden = tab !== "progress";
   const statsEl = document.getElementById("progress-stats");
   if (statsEl) statsEl.hidden = tab !== "progress-stats";
-  const activeTab = tab === "progress-stats" ? "progress" : tab;
-  ["practice", "history", "questions", "progress", "memos"].forEach((name) => {
+  const runEl = document.getElementById("progress-run");
+  if (runEl) runEl.hidden = tab !== "progress-run";
+  const progressesEl = document.getElementById("progresses");
+  if (progressesEl) progressesEl.hidden = tab !== "progresses";
+  const tasksEl = document.getElementById("tasks");
+  if (tasksEl) tasksEl.hidden = tab !== "tasks";
+  const progressTabs = tab === "progress" || tab === "progress-stats" || tab === "progress-run";
+  const nestedInQuestions = tab === "history" || (progressTabs && progressOrigin === "questions");
+  const nestedInTasks = progressTabs && progressOrigin === "tasks";
+  const nestedInProgresses = progressTabs && progressOrigin === "progresses";
+  const activeTab = nestedInQuestions
+    ? "questions"
+    : nestedInTasks
+      ? "tasks"
+      : nestedInProgresses
+        ? "progresses"
+        : tab;
+  ["practice", "questions", "tasks", "progresses", "memos"].forEach((name) => {
     const tabButton = document.getElementById(`tab-${name}`);
     if (!tabButton) return;
     const on = name === activeTab;
@@ -1400,6 +1591,7 @@ function showPractice() {
 async function showHistory() {
   rememberRoute("history");
   activate("history");
+  window.scrollTo(0, 0);
   const list = document.getElementById("history-list");
   list.replaceChildren();
   addLine(list, "note", "正在读取…");
@@ -2062,23 +2254,127 @@ async function answerQuestion(id) {
   renderPractice();
 }
 
-async function openProgressStats(questionId) {
-  rememberRoute("progress-stats", questionId || "");
-  activate("progress-stats");
+async function leaveProgress() {
+  if (progressOrigin === "tasks") await showTasks();
+  else if (progressOrigin === "progresses") await showProgresses();
+  else await showQuestions();
+}
+
+async function leaveProgressRun() {
+  const questionId = progressRunId || "";
+  if (progressRunReturn === "progress") await openProgress(questionId, progressOrigin);
+  else await openProgressStats(questionId);
+}
+
+async function openProgressRun(questionId, runId, fromView) {
+  setProgressRunReturn(fromView);
+  progressRunId = questionId || "";
+  rememberRoute("progress-run", questionId || "", runId || "");
+  activate("progress-run");
   window.scrollTo(0, 0);
   try {
-    await window.QuickbackProgress.showStats(api, showBanner, questionId || "", showQuestions);
+    await window.QuickbackProgress.showRun(api, showBanner, questionId || "", runId || "");
   } catch (error) {
     showBanner(error.message);
   }
 }
 
-async function openProgress(questionId) {
+async function openProgressStats(questionId, origin) {
+  if (origin) setProgressOrigin(origin);
+  rememberRoute("progress-stats", questionId || "");
+  activate("progress-stats");
+  window.scrollTo(0, 0);
+  try {
+    await window.QuickbackProgress.showStats(
+      api,
+      showBanner,
+      questionId || "",
+      leaveProgress,
+      (id, runId) => openProgressRun(id, runId, "progress-stats"),
+    );
+  } catch (error) {
+    showBanner(error.message);
+  }
+}
+
+async function openProgress(questionId, origin) {
+  setProgressOrigin(origin || "questions");
   rememberRoute("progress", questionId || "");
   activate("progress");
   window.scrollTo(0, 0);
   try {
-    await window.QuickbackProgress.show(api, showBanner, questionId || "", openProgressStats);
+    await window.QuickbackProgress.show(
+      api,
+      showBanner,
+      questionId || "",
+      openProgressStats,
+      (id, runId) => openProgressRun(id, runId, "progress"),
+    );
+  } catch (error) {
+    showBanner(error.message);
+  }
+}
+
+async function showProgresses() {
+  rememberRoute("progresses");
+  activate("progresses");
+  window.scrollTo(0, 0);
+  try {
+    await window.QuickbackProgresses.show(api, showBanner, (questionId) =>
+      openProgressStats(questionId, "progresses"),
+    );
+  } catch (error) {
+    showBanner(error.message);
+  }
+}
+
+async function showTasks() {
+  rememberRoute("tasks");
+  activate("tasks");
+  window.scrollTo(0, 0);
+  try {
+    await window.QuickbackTasks.show(api, showBanner, openTaskPractice);
+  } catch (error) {
+    showBanner(error.message);
+  }
+}
+
+async function openTaskPractice(questionId) {
+  setProgressOrigin("tasks");
+  rememberRoute("progress", questionId || "");
+  activate("progress");
+  window.scrollTo(0, 0);
+  try {
+    await window.QuickbackProgress.show(
+      api,
+      showBanner,
+      questionId || "",
+      async (finishedId) => {
+        try {
+          const page = await api(`/api/questions/${encodeURIComponent(finishedId)}/progress`);
+          const runs = page.runs || [];
+          const finished = runs.length ? runs[runs.length - 1] : null;
+          const average = finished && finished.stats ? finished.stats.average : null;
+          await api(`/api/tasks/${encodeURIComponent(finishedId)}/complete`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ average }),
+          });
+          if (window.quickbackToast) window.quickbackToast("任务已记入，并写入进展统计。");
+        } catch (error) {
+          showBanner(error.message);
+        }
+        if (window.QuickbackTasks && window.QuickbackTasks.refresh) {
+          try {
+            await window.QuickbackTasks.refresh();
+          } catch (error) {
+            /* keep stats view even if refresh fails */
+          }
+        }
+        await openProgressStats(finishedId, "tasks");
+      },
+      (id, runId) => openProgressRun(id, runId, "progress"),
+    );
   } catch (error) {
     showBanner(error.message);
   }
@@ -2099,7 +2395,15 @@ async function showQuestions() {
   rememberRoute("questions");
   activate("questions");
   try {
-    await window.QuickbackQuestions.show(api, showBanner, answerQuestion, dropQuestion, openProgress, openProgressStats);
+    await window.QuickbackQuestions.show(
+      api,
+      showBanner,
+      answerQuestion,
+      dropQuestion,
+      openProgress,
+      (questionId) => openProgressStats(questionId, "questions"),
+      showHistory,
+    );
     window.scrollTo(0, 0);
   } catch (error) {
     showBanner(error.message);
@@ -2109,23 +2413,27 @@ async function showQuestions() {
 document.getElementById("tab-practice").addEventListener("click", (event) => {
   if (followLink(event)) showPractice();
 });
-document.getElementById("tab-history").addEventListener("click", (event) => {
-  if (followLink(event)) showHistory();
-});
 document.getElementById("tab-questions").addEventListener("click", (event) => {
   if (followLink(event)) showQuestions();
 });
+[
+  ["history-back", showQuestions],
+  ["progress-back", leaveProgress],
+  ["progress-stats-back", leaveProgress],
+  ["progress-run-back", leaveProgressRun],
+].forEach(([id, action]) => {
+  const button = document.getElementById(id);
+  if (!button) return;
+  button.addEventListener("click", () => action());
+});
+document.getElementById("tab-progresses").addEventListener("click", (event) => {
+  if (followLink(event)) showProgresses();
+});
+document.getElementById("tab-tasks").addEventListener("click", (event) => {
+  if (followLink(event)) showTasks();
+});
 document.getElementById("tab-memos").addEventListener("click", (event) => {
   if (followLink(event)) showMemos();
-});
-document.getElementById("tab-progress").addEventListener("click", (event) => {
-  if (!followLink(event)) return;
-  const route = routeFromLocation();
-  const onProgress = route.name === "progress" || route.name === "progress-stats";
-  const current = onProgress && route.question
-    ? route.question
-    : (window.QuickbackProgress ? window.QuickbackProgress.questionId() : "");
-  openProgress(current || "");
 });
 
 turnsEl.addEventListener("click", (event) => {
@@ -2222,24 +2530,51 @@ function missingKeyMessage(provider) {
 function showProvider(view) {
   state.provider = view.provider;
   state.hasKey = view.has_key;
+  state.providers = Array.isArray(view.providers) ? view.providers : state.providers;
   if (providerSelect) providerSelect.value = view.provider;
+  window.QuickbackSpeech = {
+    provider: state.provider,
+    providers: state.providers,
+    label: providerLabel,
+  };
   if (!view.has_key) showBanner(missingKeyMessage(view.provider));
 }
 
 async function applyRoute() {
   const route = routeFromLocation();
-  const url = pagePath(route.name, route.question);
+  if (route.name === "progress-run") setProgressRunReturn(route.via);
+  if (route.from) setProgressOrigin(route.from);
+  const url = pagePath(route.name, route.question, route.run);
   if (location.pathname + location.search !== url) {
-    history.replaceState({ name: route.name, question: route.question }, "", url);
+    history.replaceState(
+      {
+        name: route.name,
+        question: route.question,
+        run: route.run || "",
+        from: route.from,
+        via: route.via,
+      },
+      "",
+      url,
+    );
   }
-  if (route.name === "progress" || route.name === "progress-stats") syncProgressHref(route.question);
   applyingRoute = true;
   try {
     if (route.name === "history") await showHistory();
     else if (route.name === "questions") await showQuestions();
     else if (route.name === "memos") await showMemos();
-    else if (route.name === "progress") await openProgress(route.question);
-    else if (route.name === "progress-stats") await openProgressStats(route.question);
+    else if (route.name === "progresses") await showProgresses();
+    else if (route.name === "tasks") await showTasks();
+    else if (route.name === "progress") await openProgress(route.question, route.from);
+    else if (route.name === "progress-stats") {
+      setProgressOrigin(route.from || "questions");
+      await openProgressStats(route.question);
+    } else if (route.name === "progress-run") {
+      setProgressOrigin(route.from || "questions");
+      setProgressRunReturn(route.via);
+      progressRunId = route.question || "";
+      await openProgressRun(route.question, route.run, route.via);
+    }
     else showPractice();
   } finally {
     applyingRoute = false;

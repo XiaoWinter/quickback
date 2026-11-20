@@ -1,6 +1,62 @@
 import re
 
 
+def _ielts_avoid_block(existing_en: list[str] | None = None) -> str:
+    sample = [str(item or "").strip() for item in (existing_en or []) if str(item or "").strip()]
+    if not sample:
+        return ""
+    lines = "\n".join(f"- {item}" for item in sample[:40])
+    return f"\nDo not repeat or lightly rephrase these existing questions:\n{lines}\n"
+
+
+def build_ielts_speaking_prompt(existing_en: list[str] | None = None) -> str:
+    avoid = _ielts_avoid_block(existing_en)
+    return f"""You write IELTS Speaking practice questions for Chinese learners.
+Create exactly one question for Part 1, one for Part 2, and one for Part 3.
+Requirements:
+- Part 1: a short familiar personal question.
+- Part 2: a concise cue-card prompt starting with "Describe" and including 2-3 short "You should say" points. Keep the whole English text under 220 characters.
+- Part 3: a more abstract discussion question related to Part 2.
+- English must be natural exam-style English.
+- Chinese (zh) must be brief Simplified Chinese.
+- Return one JSON object only, no markdown.
+{avoid}
+JSON shape:
+{{
+  "part1": {{"en": "...", "zh": "..."}},
+  "part2": {{"en": "...", "zh": "..."}},
+  "part3": {{"en": "...", "zh": "..."}}
+}}
+"""
+
+
+def build_ielts_part_prompt(part: str, existing_en: list[str] | None = None) -> str:
+    specs = {
+        "part1": "Part 1: a short familiar personal question.",
+        "part2": (
+            'Part 2: a concise cue-card prompt starting with "Describe" and including '
+            '2-3 short "You should say" points. Keep the whole English text under 220 characters.'
+        ),
+        "part3": "Part 3: a more abstract discussion question suitable for IELTS Speaking Part 3.",
+    }
+    key = str(part or "").strip()
+    spec = specs.get(key)
+    if not spec:
+        raise ValueError(f"unknown ielts part: {part}")
+    avoid = _ielts_avoid_block(existing_en)
+    return f"""You write IELTS Speaking practice questions for Chinese learners.
+Create exactly one question for {key.replace("part", "Part ")}.
+Requirements:
+- {spec}
+- English must be natural exam-style English.
+- Chinese (zh) must be brief Simplified Chinese.
+- Return one JSON object only, no markdown.
+{avoid}
+JSON shape:
+{{"en": "...", "zh": "..."}}
+"""
+
+
 def build_feedback_prompt(
     *,
     topic_en: str,
@@ -292,10 +348,12 @@ Give integer scores from 0 to 100:
 Each note is one short Simplified Chinese sentence about this answer. No praise, no English, no rewritten answer.
 Do not say the answer mixes Chinese unless the transcript itself contains Chinese.
 
-Also return natural and natural_zh.
+Also return natural, natural_zh, native, and native_zh.
 natural is the whole answer in English. Keep every point they made, in the same order, including a later sentence. Do not stop after the first sentence. Do not drop a point.
 Copy English that is already fine. Fix only broken grammar and clearly unidiomatic phrases. Do not add facts they did not say. Do not leave Chinese characters in natural.
 natural_zh translates that whole natural line into Simplified Chinese, sentence by sentence.
+native is how a native speaker would say the same meaning out loud to a friend. Keep the same facts and order. Contractions are fine. Do not leave Chinese characters in native.
+native_zh translates that whole native line into Simplified Chinese.
 
 Also point out concrete mistakes in fixes, at most 3.
 Each item copies a short wrong fragment from the transcript (spoken), gives only that replacement in English (better), and explains that one mistake in one short Simplified Chinese sentence (note).
@@ -306,5 +364,5 @@ If the answer has no such mistake, fixes is [].
 These fixes do not change the scores.
 
 Return one JSON object and nothing else:
-{{"comprehensibility": 0, "relevance": 0, "fluency": 0, "content": 0, "comprehensibility_note": "简体中文", "relevance_note": "简体中文", "fluency_note": "简体中文", "content_note": "简体中文", "natural": "the whole answer in English", "natural_zh": "整句修正版的简体中文", "fixes": [{{"spoken": "he go", "better": "he went", "note": "讲过去的事，用 went。"}}]}}
+{{"comprehensibility": 0, "relevance": 0, "fluency": 0, "content": 0, "comprehensibility_note": "简体中文", "relevance_note": "简体中文", "fluency_note": "简体中文", "content_note": "简体中文", "natural": "the whole answer in English", "natural_zh": "整句修正版的简体中文", "native": "the whole answer as a native would say it", "native_zh": "整句地道版的简体中文", "fixes": [{{"spoken": "he go", "better": "he went", "note": "讲过去的事，用 went。"}}]}}
 """

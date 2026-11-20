@@ -5,7 +5,13 @@ from pathlib import Path
 from app.config import ROOT, settings
 
 CHOICES = ("gemini", "qwen")
+LABELS = {"gemini": "Gemini", "qwen": "千问"}
 PATH = ROOT / "data" / "provider.json"
+
+
+def provider_label(name: str) -> str:
+    key = str(name or "").strip().lower()
+    return LABELS.get(key, key or "")
 
 
 class ProviderStore:
