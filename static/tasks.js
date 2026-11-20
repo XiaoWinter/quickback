@@ -35,7 +35,7 @@
     root.appendChild(
       line(
         "note",
-        `从已归档题目里按遗忘曲线安排，每天锁定 ${view.min || 3}–${view.max || 5} 道。已完成 ${done}，待做 ${pending}。`,
+        `从已归档题目里按遗忘曲线安排，每天锁定 ${view.min || 3}–${view.max || 5} 道；平均分达 60 才算完成。已完成 ${done}，待做 ${pending}。`,
       ),
     );
     const items = view.items || [];

@@ -818,6 +818,8 @@ class GeminiClient:
         transcript: str,
         duration_ms: int | None,
         earlier: list[tuple[str, str]],
+        audio: bytes | None = None,
+        audio_mime: str = "audio/wav",
         reference: bytes | None = None,
         reference_mime: str = "audio/wav",
     ) -> dict:
@@ -831,9 +833,12 @@ class GeminiClient:
             transcript=transcript,
             duration_ms=duration_ms,
             earlier=earlier,
+            answer_audio=bool(audio),
             reference=bool(reference),
         )
         contents: list = [prompt]
+        if audio:
+            contents.append(_audio_part(types, audio, audio_mime or "audio/wav"))
         if reference:
             contents.append(_audio_part(types, reference, reference_mime or "audio/wav"))
         try:

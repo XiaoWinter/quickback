@@ -15,6 +15,7 @@ DAILY_MIN = 3
 DAILY_MAX = 5
 DEFAULT_EASE = 2.5
 MIN_EASE = 1.3
+PASS_AVERAGE = 60
 
 _lock = threading.Lock()
 
@@ -42,10 +43,23 @@ def _due_iso(days: float, *, now: datetime | None = None) -> str:
     return (stamp + delta).isoformat(timespec="seconds")
 
 
-def grade_from_average(average: int | float | None) -> str:
+def average_value(average: int | float | None) -> float | None:
+    if average is None or (isinstance(average, str) and not str(average).strip()):
+        return None
     try:
-        score = float(average)
+        return float(average)
     except (TypeError, ValueError):
+        return None
+
+
+def meets_pass_average(average: int | float | None) -> bool:
+    score = average_value(average)
+    return score is not None and score >= PASS_AVERAGE
+
+
+def grade_from_average(average: int | float | None) -> str:
+    score = average_value(average)
+    if score is None:
         score = 0.0
     if score >= 85:
         return "easy"
@@ -235,12 +249,31 @@ class TaskStore:
         qid = str(question_id or "").strip()
         if not qid:
             raise TaskError("没有这道题。")
+        if not meets_pass_average(average):
+            score = average_value(average)
+            shown = "—" if score is None else str(int(score + 0.5) if score >= 0 else 0)
+            raise TaskError(f"平均 {shown} 分，低于 {PASS_AVERAGE}，请重做。")
         mark = str(grade or "").strip().lower() or grade_from_average(average)
         if mark not in {"again", "hard", "good", "easy"}:
             mark = "good"
         with _lock:
             data = self._read()
             cards = data.setdefault("cards", {})
+            daily = data.get("daily") if isinstance(data.get("daily"), dict) else {}
+            plan = daily.get("items") if isinstance(daily.get("items"), list) else []
+            for entry in plan:
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get("id") or "") != qid:
+                    continue
+                if str(entry.get("done_at") or "").strip():
+                    current = cards.get(qid) or {}
+                    return {
+                        "question_id": qid,
+                        "grade": str(current.get("last_grade") or mark),
+                        "already_done": True,
+                        **current,
+                    }
             current = cards.get(qid) or {
                 "ease": DEFAULT_EASE,
                 "interval_days": 0,
@@ -266,8 +299,6 @@ class TaskStore:
                 }
             )
             data["history"] = history[-500:]
-            daily = data.get("daily") if isinstance(data.get("daily"), dict) else {}
-            plan = daily.get("items") if isinstance(daily.get("items"), list) else []
             for entry in plan:
                 if not isinstance(entry, dict):
                     continue
@@ -278,6 +309,48 @@ class TaskStore:
                 data["daily"] = daily
             self._write(data)
             return {"question_id": qid, "grade": mark, **updated}
+
+    def complete_if_today(
+        self,
+        question_id: str,
+        average: int | float | None = None,
+        grade: str | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> dict | None:
+        """Mark today's planned task done once. No-op if not in today's plan or already done."""
+        qid = str(question_id or "").strip()
+        if not qid:
+            return None
+        stamp = now or datetime.now().astimezone()
+        day = stamp.date().isoformat()
+        with _lock:
+            data = self._read()
+            daily = data.get("daily") if isinstance(data.get("daily"), dict) else {}
+            if str(daily.get("date") or "") != day:
+                return None
+            plan = daily.get("items") if isinstance(daily.get("items"), list) else []
+            entry = next(
+                (
+                    item
+                    for item in plan
+                    if isinstance(item, dict) and str(item.get("id") or "") == qid
+                ),
+                None,
+            )
+            if entry is None:
+                return None
+            if str(entry.get("done_at") or "").strip():
+                return None
+        if not meets_pass_average(average):
+            score = average_value(average)
+            return {
+                "question_id": qid,
+                "redo": True,
+                "average": None if score is None else int(score + 0.5) if score >= 0 else 0,
+                "pass_average": PASS_AVERAGE,
+            }
+        return self.complete(question_id, average=average, grade=grade)
 
     def _present_plan(self, plan: list, by_id: dict, closed_set: set[str]) -> list[dict]:
         items: list[dict] = []

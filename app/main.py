@@ -647,6 +647,25 @@ async def progress_retry(run_id: str):
     return await _score_progress(run_id, question_id)
 
 
+@app.post("/api/progress/{run_id}/answers/{number}/rescore")
+async def progress_rescore_answer(run_id: str, number: int):
+    return await _rescore_progress(run_id, number)
+
+
+@app.post("/api/progress/{run_id}/rescore")
+async def progress_rescore_run(run_id: str):
+    try:
+        numbers = progress.answer_numbers(run_id)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
+    if not numbers:
+        raise HTTPException(status_code=400, detail="这次还没有可重评的题。")
+    page = None
+    for number in numbers:
+        page = await _rescore_progress(run_id, number)
+    return page
+
+
 @app.post("/api/progress/{run_id}/redo")
 def progress_redo(run_id: str):
     try:
@@ -666,7 +685,31 @@ def progress_finish(run_id: str):
         raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
     except StorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _complete_today_task(question_id)
     return _progress_question_page(question_id)
+
+
+def _complete_today_task(question_id: str) -> None:
+    """If this question is in today's task plan, mark it done using the latest run average."""
+    try:
+        question = get_question(question_id)
+    except QuestionError:
+        return
+    states = store.latest_states()
+    if not (states.get(question_id) or {}).get("closed"):
+        return
+    try:
+        page = progress.page(question)
+        runs = page.get("runs") or []
+        latest = runs[-1] if runs else None
+        stats = (latest or {}).get("stats") if isinstance(latest, dict) else None
+        average = (stats or {}).get("average") if isinstance(stats, dict) else None
+        tasks.ensure_card(question_id)
+        tasks.complete_if_today(question_id, average=average)
+    except (TaskError, StorageError, NotFound) as exc:
+        log.info("task complete after progress finish skipped: %s", exc)
+    except Exception:
+        log.exception("task complete after progress finish failed")
 
 
 @app.delete("/api/progress/{run_id}")
@@ -797,19 +840,11 @@ async def _score_progress(run_id: str, question_id: str) -> dict:
         if not str(transcript or "").strip():
             progress.fail_pending(run_id, "没听清，再说一次。")
             return _progress_question_page(question_id)
-        ref = store.corrected_speech(ctx["question_id"], ctx["prompt_en"])
-        reference = ref["audio"] if ref and ref.get("has_speech") else None
         parsed = await asyncio.to_thread(
-            client.progress_score,
-            topic_en=ctx["topic_en"],
-            topic_zh=ctx["topic_zh"],
-            prompt_en=ctx["prompt_en"],
-            prompt_zh=ctx["prompt_zh"],
-            transcript=transcript,
-            duration_ms=ctx["duration_ms"],
-            earlier=ctx["earlier"],
-            reference=reference,
-            reference_mime=(ref or {}).get("mime") or "audio/wav",
+            _call_progress_score,
+            client,
+            ctx,
+            transcript,
         )
         progress.commit_answer(run_id, transcript, parsed)
     except ModelError as exc:
@@ -828,6 +863,52 @@ async def _score_progress(run_id: str, question_id: str) -> dict:
         except (NotFound, StorageError):
             raise HTTPException(status_code=502, detail="评分中断了，可以点重试。") from exc
         return _progress_question_page(question_id)
+    return _progress_question_page(question_id)
+
+
+def _call_progress_score(client, ctx: dict, transcript: str) -> dict:
+    ref = store.corrected_speech(ctx["question_id"], ctx["prompt_en"])
+    reference = ref["audio"] if ref and ref.get("has_speech") else None
+    return client.progress_score(
+        topic_en=ctx["topic_en"],
+        topic_zh=ctx["topic_zh"],
+        prompt_en=ctx["prompt_en"],
+        prompt_zh=ctx["prompt_zh"],
+        transcript=transcript,
+        duration_ms=ctx["duration_ms"],
+        earlier=ctx["earlier"],
+        audio=ctx["audio"],
+        audio_mime=ctx["mime"] or "application/octet-stream",
+        reference=reference,
+        reference_mime=(ref or {}).get("mime") or "audio/wav",
+    )
+
+
+async def _rescore_progress(run_id: str, number: int) -> dict:
+    import asyncio
+
+    try:
+        client = _client()
+        ctx = progress.rescore_context(run_id, number)
+    except ModelError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="找不到这次进展。") from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    transcript = ctx["transcript"]
+    try:
+        parsed = await asyncio.to_thread(_call_progress_score, client, ctx, transcript)
+        question_id = progress.apply_rescore(run_id, number, transcript, parsed)
+    except ModelError as exc:
+        log.info("progress rescore %s/%s failed: %s", run_id, number, exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (NotFound, StorageError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("progress rescore %s/%s failed", run_id, number)
+        raise HTTPException(status_code=502, detail="重评中断了，可以再试一次。") from exc
     return _progress_question_page(question_id)
 
 

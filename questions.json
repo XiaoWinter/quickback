@@ -1,5 +1,29 @@
 [
   {
+    "id": "do-you-prefer-working-alone-or-in-a-team",
+    "en": "Do you prefer working alone or in a team?",
+    "zh": "你喜欢独自工作还是团队合作？",
+    "category": "口语1",
+    "created_at": "2026-11-19T23:32:56-08:00",
+    "updated_at": "2026-11-19T23:32:56-08:00"
+  },
+  {
+    "id": "describe-a-skill-you-learned-you-should",
+    "en": "Describe a skill you learned. You should say what it is, how you learned it, and why you find it useful.",
+    "zh": "描述一项你学到的技能。说说是什么，怎么学的，以及为何有用。",
+    "category": "口语2",
+    "created_at": "2026-11-19T23:32:56-08:00",
+    "updated_at": "2026-11-19T23:32:56-08:00"
+  },
+  {
+    "id": "how-does-technology-change-the-way-peopl",
+    "en": "How does technology change the way people learn new skills today?",
+    "zh": "科技如何改变如今人们学习新技能的方式？",
+    "category": "口语3",
+    "created_at": "2026-11-19T23:32:56-08:00",
+    "updated_at": "2026-11-19T23:32:56-08:00"
+  },
+  {
     "id": "should-everyone-take-some-sort-of-furthe",
     "en": "Should everyone take some sort of further education?",
     "zh": "每个人都应该接受某种形式的进一步教育吗？",

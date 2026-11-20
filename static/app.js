@@ -2298,16 +2298,20 @@ async function openProgressStats(questionId, origin) {
 }
 
 async function openProgress(questionId, origin) {
-  setProgressOrigin(origin || "questions");
+  const from = origin || "questions";
+  setProgressOrigin(from);
   rememberRoute("progress", questionId || "");
   activate("progress");
   window.scrollTo(0, 0);
+  const onDone = from === "tasks"
+    ? finishTaskProgress
+    : (id) => openProgressStats(id, from);
   try {
     await window.QuickbackProgress.show(
       api,
       showBanner,
       questionId || "",
-      openProgressStats,
+      onDone,
       (id, runId) => openProgressRun(id, runId, "progress"),
     );
   } catch (error) {
@@ -2339,45 +2343,45 @@ async function showTasks() {
   }
 }
 
-async function openTaskPractice(questionId) {
-  setProgressOrigin("tasks");
-  rememberRoute("progress", questionId || "");
-  activate("progress");
-  window.scrollTo(0, 0);
+async function finishTaskProgress(finishedId) {
+  const passAverage = 60;
   try {
-    await window.QuickbackProgress.show(
-      api,
-      showBanner,
-      questionId || "",
-      async (finishedId) => {
-        try {
-          const page = await api(`/api/questions/${encodeURIComponent(finishedId)}/progress`);
-          const runs = page.runs || [];
-          const finished = runs.length ? runs[runs.length - 1] : null;
-          const average = finished && finished.stats ? finished.stats.average : null;
-          await api(`/api/tasks/${encodeURIComponent(finishedId)}/complete`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ average }),
-          });
-          if (window.quickbackToast) window.quickbackToast("任务已记入，并写入进展统计。");
-        } catch (error) {
-          showBanner(error.message);
-        }
-        if (window.QuickbackTasks && window.QuickbackTasks.refresh) {
-          try {
-            await window.QuickbackTasks.refresh();
-          } catch (error) {
-            /* keep stats view even if refresh fails */
-          }
-        }
-        await openProgressStats(finishedId, "tasks");
-      },
-      (id, runId) => openProgressRun(id, runId, "progress"),
-    );
+    const page = await api(`/api/questions/${encodeURIComponent(finishedId)}/progress`);
+    const runs = page.runs || [];
+    const finished = runs.length ? runs[runs.length - 1] : null;
+    const average = finished && finished.stats ? finished.stats.average : null;
+    const score = Number(average);
+    if (!Number.isFinite(score) || score < passAverage) {
+      const shown = Number.isFinite(score) ? String(Math.round(score)) : "—";
+      if (window.quickbackToast) {
+        window.quickbackToast(`平均 ${shown} 分，低于 ${passAverage}，请重做。`);
+      } else {
+        showBanner(`平均 ${shown} 分，低于 ${passAverage}，请重做。`);
+      }
+      await openProgress(finishedId, "tasks");
+      return;
+    }
+    await api(`/api/tasks/${encodeURIComponent(finishedId)}/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ average }),
+    });
+    if (window.quickbackToast) window.quickbackToast("任务已记入，并写入进展统计。");
   } catch (error) {
     showBanner(error.message);
   }
+  if (window.QuickbackTasks && window.QuickbackTasks.refresh) {
+    try {
+      await window.QuickbackTasks.refresh();
+    } catch (error) {
+      /* keep stats view even if refresh fails */
+    }
+  }
+  await openProgressStats(finishedId, "tasks");
+}
+
+async function openTaskPractice(questionId) {
+  await openProgress(questionId, "tasks");
 }
 
 async function showMemos() {

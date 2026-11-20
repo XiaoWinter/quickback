@@ -300,6 +300,7 @@ def build_progress_prompt(
     transcript: str,
     duration_ms: int | None,
     earlier: list[tuple[str, str]],
+    answer_audio: bool = False,
     reference: bool = False,
 ) -> str:
     seconds = max(0, int(duration_ms or 0)) / 1000
@@ -312,8 +313,9 @@ def build_progress_prompt(
     if question_form(prompt_en) == "closed":
         content_rule = (
             "This question is closed: it asks for yes or no, a frequency, a number, a time, or a single choice. "
-            "A direct answer that states the fact is already the top of content. "
-            "Do not lower content because there is no scene, and do not raise it for an extra scene."
+            "A direct answer that states the fact can score high on content for this question. "
+            "Do not lower content because there is no scene, and do not raise it for an extra scene. "
+            "High content alone does not mean the other scores are high."
         )
     else:
         content_rule = (
@@ -322,15 +324,22 @@ def build_progress_prompt(
             "A checkable detail scores higher than a bare judgment. A visible action scores higher still. "
             "The top score needs that scene to answer this question. A list of names does not raise it."
         )
-    reference_note = ""
+    audio_note = ""
+    if answer_audio:
+        audio_note += (
+            "\nThe learner's spoken recording for this answer is attached after this text. "
+            "Listen to it for fluency and comprehensibility. "
+            "The transcript may miss hesitations, restarts, pacing, or pronunciation; trust the recording for delivery.\n"
+        )
     if reference:
-        reference_note = (
-            "\nA recording of the corrected version for this question is attached after this text. "
+        where = "after the learner recording" if answer_audio else "after this text"
+        audio_note += (
+            f"\nA recording of the corrected version for this question is also attached {where}. "
             "It is an earlier practice reading, not this answer. "
-            "Use it only when scoring fluency, along with the transcript and the recording length. "
+            "Use it only as a fluency reference, along with the learner recording, the transcript, and the recording length. "
             "Do not let it replace points the learner added this time.\n"
         )
-    return f"""Score this spoken answer. The learner may mix English and Chinese.
+    return f"""Score this spoken English answer. The learner is practicing spoken English and may fall back to Chinese when stuck.
 Topic: {topic_en}
 Topic in Chinese: {topic_zh}
 This question: {prompt_en}
@@ -338,27 +347,36 @@ This question in Chinese: {prompt_zh}
 Recording length: {seconds:.1f} seconds
 {history}Transcript:
 \"\"\"{transcript}\"\"\"
-{reference_note}
-Give integer scores from 0 to 100:
-- comprehensibility: a listener can tell what they mean. Chinese mixed in can still score high.
-- relevance: the answer responds to this question, not a different one.
-- fluency: restarts, repetition, and broken phrases in the transcript. Use the recording length too. A fragment that is too short for the question scores lower. Do not grade grammar as its own penalty.
-- content: {content_rule} Do not lower content for restarts, repetition, or grammar.
+{audio_note}
+Give integer scores from 0 to 100. Calibrate every score to IELTS Speaking bands — do not inflate:
+- 80-100 ≈ IELTS 7-8: flexible, mostly accurate English; only rare slips; easy to follow at length.
+- 60-80 ≈ IELTS 6-7: clear enough overall, but noticeable grammar slips, limited range, or uneven fluency.
+- 40-60 ≈ IELTS 5-6: basic meaning comes through; frequent errors, short or strained delivery, thin detail.
+- 20-40 ≈ IELTS 4-5: hard to follow; heavy breakdown, long pauses, or very little English.
+- 0-20 ≈ below IELTS 4: almost no usable English for this question.
+Most everyday learner answers with repeated grammar mistakes, hesitations, or thin detail belong in 60-80, not 80-100. Reserve 80-100 for English that would genuinely sit around IELTS 7-8. Do not cluster scores in the high 80s or 90s out of politeness.
+- comprehensibility: how clearly an English listener can follow the English, on the IELTS scale above. Chinese words or sentences do not count as clear English. The more Chinese they used, the lower this score.
+- relevance: the answer responds to this question, not a different one. On-topic meaning said only in Chinese does not earn a high relevance score — this is English speaking practice. More Chinese means lower relevance.
+- fluency: restarts, repetition, broken phrases, and how often they switch into Chinese instead of finishing in English, on the IELTS scale above. Prefer the attached learner recording when present; also use the transcript and recording length. A fragment that is too short for the question scores lower. Heavy Chinese use must lower fluency. Do not grade grammar as its own penalty, but broken delivery from grammar struggle still lowers fluency.
+- content: {content_rule} Do not lower content for restarts, repetition, or grammar. Do not give high content for detail that was only spoken in Chinese. More Chinese means lower content. Even a complete closed answer should not push language scores into 80-100 unless the English itself is IELTS 7-8.
+
+Chinese penalty: any Chinese characters in the transcript are a stuck point. The higher the share of Chinese letters versus English letters, the lower every score. An answer that is entirely Chinese must score 0 on all four. Do not keep high scores just because the meaning is clear in Chinese.
+Do not say the answer mixes Chinese unless the transcript itself contains Chinese.
 
 Each note is one short Simplified Chinese sentence about this answer. No praise, no English, no rewritten answer.
-Do not say the answer mixes Chinese unless the transcript itself contains Chinese.
+If they used Chinese, at least one note should briefly say that falling back to Chinese lowered the score.
 
 Also return natural, natural_zh, native, and native_zh.
 natural is the whole answer in English. Keep every point they made, in the same order, including a later sentence. Do not stop after the first sentence. Do not drop a point.
-Copy English that is already fine. Fix only broken grammar and clearly unidiomatic phrases. Do not add facts they did not say. Do not leave Chinese characters in natural.
+Copy English that is already fine. Fix only broken grammar and clearly unidiomatic phrases. Translate every Chinese stretch into simple English with the same meaning. Do not add facts they did not say. Do not leave Chinese characters in natural.
 natural_zh translates that whole natural line into Simplified Chinese, sentence by sentence.
 native is how a native speaker would say the same meaning out loud to a friend. Keep the same facts and order. Contractions are fine. Do not leave Chinese characters in native.
 native_zh translates that whole native line into Simplified Chinese.
 
 Also point out concrete mistakes in fixes, at most 3.
 Each item copies a short wrong fragment from the transcript (spoken), gives only that replacement in English (better), and explains that one mistake in one short Simplified Chinese sentence (note).
-Cover grammar, word choice, tense, agreement, articles, and word order.
-Do not invent a mistake. Do not rewrite the whole answer. Do not turn Chinese they used on purpose into an error.
+Cover grammar, word choice, tense, agreement, articles, word order, and Chinese stretches that should have been said in English.
+Do not invent a mistake. Do not rewrite the whole answer. A Chinese fragment may appear as spoken, with better as the English they needed.
 British and American wording are both acceptable. have got and has got are not mistakes. Do not replace them with have or has. If they restart, only remove the repeated start and keep the wording they settled on.
 If the answer has no such mistake, fixes is [].
 These fixes do not change the scores.

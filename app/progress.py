@@ -14,13 +14,42 @@ _RUN = re.compile(r"^[a-f0-9]{32}$")
 _FILE = re.compile(r"^(?:pending|\d{2})\.(?:webm|m4a|mp3|wav|ogg)$")
 _CORRECTED = re.compile(r"^\d{2}-corrected\.wav$")
 _NATIVE = re.compile(r"^\d{2}-native\.wav$")
+_CJK = re.compile(r"[\u3400-\u9fff]")
+_LATIN = re.compile(r"[A-Za-z]")
 
 DRAFT_LIMIT = 8
 DRAFT_LENGTH = 120
 
-
 def round_half_up(value: float) -> int:
     return int(math.floor(float(value) + 0.5))
+
+
+def chinese_share(text: str) -> float:
+    sample = str(text or "")
+    cjk = len(_CJK.findall(sample))
+    latin = len(_LATIN.findall(sample))
+    total = cjk + latin
+    if total <= 0:
+        return 0.0
+    return cjk / total
+
+
+def chinese_score_scale(share: float) -> float:
+    """More Chinese → lower scores. All Chinese → 0. Squared so majority-Chinese drops fast."""
+    ratio = max(0.0, min(1.0, float(share)))
+    remain = 1.0 - ratio
+    return remain * remain
+
+
+def clamp_scores_for_chinese(scores: dict, transcript: str) -> dict:
+    scale = chinese_score_scale(chinese_share(transcript))
+    keys = ["comprehensibility", "relevance", "fluency"]
+    if "content" in scores:
+        keys = keys + ["content"]
+    out = {}
+    for key in keys:
+        out[key] = max(0, min(100, round_half_up(int(scores[key]) * scale)))
+    return out
 
 
 def weighted_raw(comprehensibility: int, relevance: int, fluency: int, content: int | None = None) -> int:
@@ -72,6 +101,51 @@ def summarize(answers: list[dict]) -> dict:
         "average": round_half_up(total / len(raws)),
         "count": len(raws),
     }
+
+
+def score_payload(parsed: dict, transcript: str) -> dict:
+    scores = clamp_scores_for_chinese(parsed.get("scores") or {}, transcript)
+    notes = parsed.get("notes") or {}
+    content = scores.get("content") if "content" in scores else None
+    raw = weighted_raw(
+        int(scores["comprehensibility"]),
+        int(scores["relevance"]),
+        int(scores["fluency"]),
+        None if content is None else int(content),
+    )
+    scored = {
+        "transcript": transcript.strip()[:8000],
+        "scores": {
+            "comprehensibility": int(scores["comprehensibility"]),
+            "relevance": int(scores["relevance"]),
+            "fluency": int(scores["fluency"]),
+        },
+        "notes": {
+            "comprehensibility": str(notes.get("comprehensibility") or ""),
+            "relevance": str(notes.get("relevance") or ""),
+            "fluency": str(notes.get("fluency") or ""),
+        },
+        "fixes": _stored_fixes(parsed.get("fixes")),
+        "natural": str(parsed.get("natural") or "")[:800],
+        "natural_zh": str(parsed.get("natural_zh") or "")[:800],
+        "native": str(parsed.get("native") or "")[:800],
+        "native_zh": str(parsed.get("native_zh") or "")[:800],
+        "raw": raw,
+        "bonus": 0,
+    }
+    if content is not None:
+        scored["scores"]["content"] = int(content)
+        scored["notes"]["content"] = str(notes.get("content") or "")
+    share = chinese_share(transcript)
+    if share > 0:
+        fluency_note = scored["notes"]["fluency"]
+        if share >= 1:
+            marker = "全文中文，按规则记零分。"
+        else:
+            marker = f"中文约占 {round_half_up(share * 100)}%，已按比例压低分数。"
+        if marker not in fluency_note:
+            scored["notes"]["fluency"] = f"{fluency_note}{marker}" if fluency_note else marker
+    return scored
 
 
 def _follow(en: str, zh: str) -> dict | None:
@@ -316,15 +390,7 @@ class ProgressStore:
             return run["question_id"]
 
     def commit_answer(self, run_id: str, transcript: str, parsed: dict) -> str:
-        scores = parsed.get("scores") or {}
-        notes = parsed.get("notes") or {}
-        content = scores.get("content") if "content" in scores else None
-        raw = weighted_raw(
-            int(scores["comprehensibility"]),
-            int(scores["relevance"]),
-            int(scores["fluency"]),
-            None if content is None else int(content),
-        )
+        scored = score_payload(parsed, transcript)
         with self._lock:
             run = self._locate(run_id)
             self._require_open(run)
@@ -357,41 +423,12 @@ class ProgressStore:
                         old.unlink()
             src.replace(folder / dest_name)
             scored = {
+                **scored,
                 "audio_file": dest_name,
                 "mime_type": pending.get("mime_type") or "application/octet-stream",
                 "duration_ms": pending.get("duration_ms"),
-                "transcript": transcript.strip()[:8000],
-                "scores": {
-                    "comprehensibility": int(scores["comprehensibility"]),
-                    "relevance": int(scores["relevance"]),
-                    "fluency": int(scores["fluency"]),
-                },
-                "notes": {
-                    "comprehensibility": str(notes.get("comprehensibility") or ""),
-                    "relevance": str(notes.get("relevance") or ""),
-                    "fluency": str(notes.get("fluency") or ""),
-                },
-                "fixes": _stored_fixes(parsed.get("fixes")),
-                "natural": str(parsed.get("natural") or "")[:800],
-                "natural_zh": str(parsed.get("natural_zh") or "")[:800],
-                "native": str(parsed.get("native") or "")[:800],
-                "native_zh": str(parsed.get("native_zh") or "")[:800],
-                "raw": raw,
-                "bonus": 0,
             }
-            if content is not None:
-                scored["scores"]["content"] = int(content)
-                scored["notes"]["content"] = str(notes.get("content") or "")
-            if not scored["natural"]:
-                scored["corrected_file"] = ""
-                stale = folder / f"{number:02d}-corrected.wav"
-                if stale.is_file():
-                    stale.unlink()
-            if not scored["native"]:
-                scored["native_file"] = ""
-                stale_native = folder / f"{number:02d}-native.wav"
-                if stale_native.is_file():
-                    stale_native.unlink()
+            self._clear_speech_files(folder, number, scored)
             if target is not None:
                 target.update(scored)
             else:
@@ -411,6 +448,76 @@ class ProgressStore:
             run["updated_at"] = now_iso()
             self._write(run)
             return run["question_id"]
+
+    def rescore_context(self, run_id: str, number: int) -> dict:
+        with self._lock:
+            run = self._locate(run_id)
+            target = next(
+                (item for item in run.get("answers") or [] if int(item.get("number") or 0) == int(number)),
+                None,
+            )
+            if target is None:
+                raise StorageError("没有这道题。")
+            folder = self._folder(run)
+            path = self._named_file(folder, target.get("audio_file"))
+            if path is None or not path.is_file():
+                raise StorageError("找不到这段录音。")
+            transcript = str(target.get("transcript") or "").strip()
+            if not transcript:
+                raise StorageError("这题还没有文稿，不能重评。")
+            prompt = target.get("prompt") if isinstance(target.get("prompt"), dict) else {}
+            earlier = []
+            for item in run.get("answers") or []:
+                if int(item.get("number") or 0) >= int(number):
+                    continue
+                asked = item.get("prompt") or {}
+                earlier.append((str(asked.get("en") or ""), str(item.get("transcript") or "")))
+            return {
+                "audio": path.read_bytes(),
+                "mime": target.get("mime_type") or "application/octet-stream",
+                "duration_ms": target.get("duration_ms"),
+                "transcript": transcript,
+                "topic_en": (run.get("question") or {}).get("en") or "",
+                "topic_zh": (run.get("question") or {}).get("zh") or "",
+                "prompt_en": prompt.get("en") or "",
+                "prompt_zh": prompt.get("zh") or "",
+                "earlier": earlier,
+                "question_id": run["question_id"],
+                "number": int(number),
+            }
+
+    def apply_rescore(self, run_id: str, number: int, transcript: str, parsed: dict) -> str:
+        scored = score_payload(parsed, transcript)
+        with self._lock:
+            run = self._locate(run_id)
+            target = next(
+                (item for item in run.get("answers") or [] if int(item.get("number") or 0) == int(number)),
+                None,
+            )
+            if target is None:
+                raise StorageError("没有这道题。")
+            folder = self._folder(run)
+            path = self._named_file(folder, target.get("audio_file"))
+            if path is None or not path.is_file():
+                raise StorageError("找不到这段录音。")
+            self._clear_speech_files(folder, int(number), scored, force=True)
+            target.update(scored)
+            if run.get("status") == "finished":
+                run["stats"] = summarize(run.get("answers") or [])
+            run["updated_at"] = now_iso()
+            self._write(run)
+            return run["question_id"]
+
+    def answer_numbers(self, run_id: str) -> list[int]:
+        with self._lock:
+            run = self._locate(run_id)
+            numbers = []
+            for item in run.get("answers") or []:
+                try:
+                    numbers.append(int(item.get("number")))
+                except (TypeError, ValueError):
+                    continue
+            return numbers
 
     def clear_pending(self, run_id: str) -> str:
         with self._lock:
@@ -655,6 +762,20 @@ class ProgressStore:
         path = self._named_file(folder, pending.get("audio_file"))
         if path is not None and path.is_file():
             path.unlink()
+
+    def _clear_speech_files(self, folder: Path, number: int, scored: dict, *, force: bool = False) -> None:
+        if force or not scored.get("natural"):
+            scored["corrected_file"] = ""
+            scored["corrected_provider"] = ""
+            stale = folder / f"{int(number):02d}-corrected.wav"
+            if stale.is_file():
+                stale.unlink()
+        if force or not scored.get("native"):
+            scored["native_file"] = ""
+            scored["native_provider"] = ""
+            stale_native = folder / f"{int(number):02d}-native.wav"
+            if stale_native.is_file():
+                stale_native.unlink()
 
     def _has_corrected(self, folder: Path, item: dict) -> bool:
         name = str(item.get("corrected_file") or "")

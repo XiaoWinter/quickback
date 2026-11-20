@@ -4,7 +4,15 @@ import unittest
 from pathlib import Path
 
 from app.gemini_client import ModelError, parse_progress_score
-from app.progress import ProgressStore, summarize, weighted_raw
+from app.progress import (
+    ProgressStore,
+    chinese_score_scale,
+    chinese_share,
+    clamp_scores_for_chinese,
+    score_payload,
+    summarize,
+    weighted_raw,
+)
 from app.prompts import build_progress_prompt, question_form
 from app.qwen_client import QwenClient, progress_content
 from app.storage import SessionStore, StorageError
@@ -27,6 +35,59 @@ class ScoreTests(unittest.TestCase):
     def test_weights(self):
         self.assertEqual(weighted_raw(80, 70, 60), 71)
         self.assertEqual(weighted_raw(80, 70, 60, 100), 80)
+
+    def test_chinese_share_scales_scores_down_to_zero(self):
+        self.assertEqual(chinese_score_scale(0), 1.0)
+        self.assertEqual(chinese_score_scale(1), 0.0)
+        self.assertGreater(chinese_score_scale(0.2), chinese_score_scale(0.6))
+        all_zh = "那时候我喜欢听中文歌，后来风格一直在变。"
+        self.assertEqual(chinese_share(all_zh), 1.0)
+        zeroed = clamp_scores_for_chinese(
+            {"comprehensibility": 80, "relevance": 90, "fluency": 70, "content": 85},
+            all_zh,
+        )
+        self.assertEqual(zeroed, {"comprehensibility": 0, "relevance": 0, "fluency": 0, "content": 0})
+        all_zh_scored = score_payload(
+            {
+                "scores": {"comprehensibility": 80, "relevance": 90, "fluency": 70, "content": 85},
+                "notes": {
+                    "comprehensibility": "听得懂。",
+                    "relevance": "答到了。",
+                    "fluency": "顺。",
+                    "content": "有细节。",
+                },
+                "fixes": [],
+            },
+            all_zh,
+        )
+        self.assertEqual(all_zh_scored["raw"], 0)
+        self.assertIn("全文中文", all_zh_scored["notes"]["fluency"])
+
+        mixed = (
+            "When I was young, I like pop music. I like流行音乐嗯。"
+            "那时候我喜欢听听的是中文的一些歌手。然后后来的话，我就逐渐听了一些啊，"
+            "国外的流行歌手，比如说像Sabrina Carpenter, Chaplin,Taylor Swift。"
+            "我不知道他们的歌具体是什么类别。但问题嗯，在这个问题上，我的回答肯定是。"
+            "不是。因为我的喜欢的风格一直在变。"
+        )
+        share = chinese_share(mixed)
+        self.assertGreaterEqual(share, 0.5)
+        scored = score_payload(
+            {
+                "scores": {"comprehensibility": 55, "relevance": 90, "fluency": 45, "content": 85},
+                "notes": {
+                    "comprehensibility": "听得懂。",
+                    "relevance": "答到了。",
+                    "fluency": "有磕绊。",
+                    "content": "有细节。",
+                },
+                "fixes": [],
+            },
+            mixed,
+        )
+        self.assertLess(scored["raw"], 25)
+        self.assertLess(scored["raw"], weighted_raw(55, 90, 45, 85))
+        self.assertIn("按比例压低", scored["notes"]["fluency"])
 
     def test_summary_ignores_follow_up_bonus(self):
         answers = [
@@ -278,6 +339,43 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(store.page(question)["open"], None)
             self.assertEqual(store.charts(), {})
 
+    def test_rescore_updates_a_finished_run(self):
+        question = {"id": "animals", "en": "What animals do you like?", "zh": "你喜欢什么动物？"}
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ProgressStore(Path(tmp))
+            opened = store.open_run(question)
+            store.save_pending(opened["id"], b"x" * 500, "audio/webm", 4000)
+            first = _scores(90, 90, 90)
+            first["natural"] = "I like cats."
+            first["native"] = "I like cats."
+            store.commit_answer(opened["id"], "I like cats.", first)
+            store.finish(opened["id"])
+            before = next(item for item in store.page(question)["runs"] if item["id"] == opened["id"])
+            self.assertEqual(before["stats"]["average"], 90)
+            ctx = store.rescore_context(opened["id"], 1)
+            self.assertEqual(ctx["transcript"], "I like cats.")
+            self.assertEqual(ctx["audio"], b"x" * 500)
+            self.assertEqual(ctx["earlier"], [])
+            folder = Path(tmp) / "animals" / opened["id"]
+            (folder / "01-corrected.wav").write_bytes(b"RIFF")
+            (folder / "01-native.wav").write_bytes(b"RIFF")
+            raw = json.loads((folder / "run.json").read_text(encoding="utf-8"))
+            raw["answers"][0]["corrected_file"] = "01-corrected.wav"
+            raw["answers"][0]["native_file"] = "01-native.wav"
+            (folder / "run.json").write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+            lowered = _scores(60, 70, 50)
+            lowered["natural"] = "I like cats."
+            lowered["scores"]["content"] = 70
+            lowered["notes"]["content"] = "有一点内容。"
+            store.apply_rescore(opened["id"], 1, "I like cats.", lowered)
+            after = next(item for item in store.page(question)["runs"] if item["id"] == opened["id"])
+            expected = weighted_raw(60, 70, 50, 70)
+            self.assertEqual(after["answers"][0]["raw"], expected)
+            self.assertEqual(after["stats"]["average"], expected)
+            self.assertFalse((folder / "01-corrected.wav").exists())
+            self.assertFalse((folder / "01-native.wav").exists())
+            self.assertEqual(store.answer_numbers(opened["id"]), [1])
+
     def _answer(self, store, question, turns):
         opened = store.open_run(question)
         for comp, transcript in turns:
@@ -353,6 +451,30 @@ class CorrectedSpeechTests(unittest.TestCase):
         self.assertIn("This question is closed", closed)
         self.assertNotIn("visible scene", closed)
 
+    def test_prompt_mentions_the_learner_recording_only_when_attached(self):
+        with_audio = self._prompt(answer_audio=True)
+        plain = self._prompt()
+        self.assertIn("learner's spoken recording", with_audio)
+        self.assertNotIn("learner's spoken recording", plain)
+        both = self._prompt(answer_audio=True, reference=True)
+        self.assertIn("after the learner recording", both)
+        self.assertIn("Prefer the attached learner recording", with_audio)
+
+    def test_prompt_lowers_scores_when_chinese_is_used(self):
+        plain = self._prompt()
+        self.assertIn("Chinese penalty", plain)
+        self.assertIn("Heavy Chinese use must lower fluency", plain)
+        self.assertNotIn("Chinese mixed in can still score high", plain)
+        self.assertIn("Chinese fragment may appear as spoken", plain)
+
+    def test_prompt_calibrates_scores_to_ielts_bands(self):
+        plain = self._prompt()
+        self.assertIn("80-100 ≈ IELTS 7-8", plain)
+        self.assertIn("60-80 ≈ IELTS 6-7", plain)
+        self.assertIn("40-60 ≈ IELTS 5-6", plain)
+        self.assertIn("Reserve 80-100", plain)
+        self.assertIn("Do not cluster scores", plain)
+
     def test_question_form_keeps_a_direct_question_closed(self):
         self.assertEqual(question_form("Do you give them fresh hay every day?"), "closed")
         self.assertEqual(question_form("How often do you check on the hay supply?"), "closed")
@@ -360,11 +482,27 @@ class CorrectedSpeechTests(unittest.TestCase):
         self.assertEqual(question_form("What do your guinea pigs like to eat the most?"), "open")
 
     def test_qwen_content_keeps_the_wav_beside_the_prompt(self):
-        content = progress_content("score this", b"RIFF", "audio/wav")
+        content, answer_ok, ref_ok = progress_content("score this", answer=b"RIFF", answer_mime="audio/wav")
+        self.assertTrue(answer_ok)
+        self.assertFalse(ref_ok)
         self.assertEqual(content[0]["text"], "score this")
         self.assertEqual(content[1]["type"], "input_audio")
         self.assertTrue(content[1]["input_audio"]["data"].startswith("data:audio/wav;base64,"))
-        self.assertEqual(progress_content("score this", None, "audio/wav"), "score this")
+        plain, no_answer, no_ref = progress_content("score this")
+        self.assertEqual(plain, "score this")
+        self.assertFalse(no_answer)
+        self.assertFalse(no_ref)
+        both, answer_ok, ref_ok = progress_content(
+            "score this",
+            answer=b"ANS",
+            answer_mime="audio/wav",
+            reference=b"REF",
+            reference_mime="audio/wav",
+        )
+        self.assertTrue(answer_ok and ref_ok)
+        self.assertEqual(len(both), 3)
+        self.assertEqual(both[1]["type"], "input_audio")
+        self.assertEqual(both[2]["type"], "input_audio")
 
     def test_qwen_retries_without_audio_when_the_model_refuses_it(self):
         score = (
@@ -393,11 +531,14 @@ class CorrectedSpeechTests(unittest.TestCase):
             transcript="I like cats.",
             duration_ms=4000,
             earlier=[],
+            audio=b"ANS",
+            audio_mime="audio/wav",
             reference=b"RIFF",
             reference_mime="audio/wav",
         )
         self.assertEqual(client.calls[0], "audio")
         self.assertIn("Transcript", client.calls[1])
+        self.assertNotIn("learner's spoken recording", client.calls[1])
         self.assertNotIn("corrected version", client.calls[1])
         self.assertEqual(parsed["scores"]["fluency"], 80)
         self.assertTrue(client._skip_progress_audio)

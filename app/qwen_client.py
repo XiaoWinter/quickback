@@ -68,22 +68,53 @@ def contains_cjk(text: str) -> bool:
     return any("\u3400" <= char <= "\u9fff" for char in text or "")
 
 
-def progress_content(prompt: str, reference: bytes | None, mime: str) -> str | list:
-    """Text prompt, plus the corrected-version recording when the scoring call can carry it."""
-    if not reference:
-        return prompt
-    encoded = base64.b64encode(reference).decode("ascii")
+def _audio_part(data: bytes, mime: str) -> dict | None:
+    encoded = base64.b64encode(data).decode("ascii")
     if len(encoded) > _MAX_AUDIO_B64:
-        return prompt
+        return None
     kind = (mime or "audio/wav").split(";", 1)[0].strip() or "audio/wav"
     audio_format = "wav" if kind in {"audio/wav", "audio/wave", "audio/x-wav"} else (kind.split("/")[-1] or "wav")
-    return [
-        {"type": "text", "text": prompt},
-        {
-            "type": "input_audio",
-            "input_audio": {"data": f"data:{kind};base64,{encoded}", "format": audio_format},
-        },
-    ]
+    return {
+        "type": "input_audio",
+        "input_audio": {"data": f"data:{kind};base64,{encoded}", "format": audio_format},
+    }
+
+
+def progress_content(
+    prompt: str,
+    *,
+    answer: bytes | None = None,
+    answer_mime: str = "audio/wav",
+    reference: bytes | None = None,
+    reference_mime: str = "audio/wav",
+) -> tuple[str | list, bool, bool]:
+    """Text prompt plus learner answer audio, and optional corrected-version audio.
+
+    Returns (content, answer_attached, reference_attached). Oversized clips are dropped;
+    the learner answer is kept preferentially over the corrected reference.
+    """
+    parts: list = [{"type": "text", "text": prompt}]
+    answer_attached = False
+    reference_attached = False
+    used = 0
+    if answer:
+        part = _audio_part(answer, answer_mime)
+        if part is not None:
+            size = len(part["input_audio"]["data"])
+            if used + size <= _MAX_AUDIO_B64:
+                parts.append(part)
+                used += size
+                answer_attached = True
+    if reference:
+        part = _audio_part(reference, reference_mime)
+        if part is not None:
+            size = len(part["input_audio"]["data"])
+            if used + size <= _MAX_AUDIO_B64:
+                parts.append(part)
+                reference_attached = True
+    if not answer_attached and not reference_attached:
+        return prompt, False, False
+    return parts, answer_attached, reference_attached
 
 
 def usable_audio_url(url: str) -> str:
@@ -313,10 +344,13 @@ class QwenClient:
         transcript: str,
         duration_ms: int | None,
         earlier: list[tuple[str, str]],
+        audio: bytes | None = None,
+        audio_mime: str = "audio/wav",
         reference: bytes | None = None,
         reference_mime: str = "audio/wav",
     ) -> dict:
-        audio = None if self._skip_progress_audio else (reference or None)
+        answer = None if self._skip_progress_audio else (audio or None)
+        ref = None if self._skip_progress_audio else (reference or None)
         try:
             text = self._progress_text(
                 topic_en=topic_en,
@@ -326,11 +360,13 @@ class QwenClient:
                 transcript=transcript,
                 duration_ms=duration_ms,
                 earlier=earlier,
-                reference=audio,
+                audio=answer,
+                audio_mime=audio_mime,
+                reference=ref,
                 reference_mime=reference_mime,
             )
         except ModelError as exc:
-            if not audio or "没有接受" not in str(exc):
+            if (not answer and not ref) or "没有接受" not in str(exc):
                 raise
             self._skip_progress_audio = True
             text = self._progress_text(
@@ -341,6 +377,8 @@ class QwenClient:
                 transcript=transcript,
                 duration_ms=duration_ms,
                 earlier=earlier,
+                audio=None,
+                audio_mime=audio_mime,
                 reference=None,
                 reference_mime=reference_mime,
             )
@@ -356,10 +394,18 @@ class QwenClient:
         transcript: str,
         duration_ms: int | None,
         earlier: list[tuple[str, str]],
+        audio: bytes | None,
+        audio_mime: str,
         reference: bytes | None,
         reference_mime: str,
     ) -> str:
-        attached = bool(reference)
+        _, answer_attached, reference_attached = progress_content(
+            "",
+            answer=audio,
+            answer_mime=audio_mime,
+            reference=reference,
+            reference_mime=reference_mime,
+        )
         prompt = build_progress_prompt(
             topic_en=topic_en,
             topic_zh=topic_zh,
@@ -368,21 +414,16 @@ class QwenClient:
             transcript=transcript,
             duration_ms=duration_ms,
             earlier=earlier,
-            reference=attached,
+            answer_audio=answer_attached,
+            reference=reference_attached,
         )
-        content = progress_content(prompt, reference, reference_mime)
-        if attached and isinstance(content, str):
-            prompt = build_progress_prompt(
-                topic_en=topic_en,
-                topic_zh=topic_zh,
-                prompt_en=prompt_en,
-                prompt_zh=prompt_zh,
-                transcript=transcript,
-                duration_ms=duration_ms,
-                earlier=earlier,
-                reference=False,
-            )
-            content = prompt
+        content, _, _ = progress_content(
+            prompt,
+            answer=audio if answer_attached else None,
+            answer_mime=audio_mime,
+            reference=reference if reference_attached else None,
+            reference_mime=reference_mime,
+        )
         payload = self._post(
             chat_url(self.base_url),
             {

@@ -27,6 +27,9 @@
   let generation = 0;
   let afterFinish = null;
   let retake = null;
+  let rescoring = false;
+  let runPage = null;
+  let runViewId = "";
   const speechReady = new Set();
   const speechJobs = new Set();
 
@@ -125,14 +128,14 @@
     queueMicrotask(() => {
       if (!canvas.isConnected || window.Chart.getChart(canvas)) return;
       window.Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
-      const peak = Math.max(...list.flatMap((item) => [item.raw, item.average]));
+      const peak = Math.max(...list.map((item) => item.raw));
       const label = cssColor("--label", "#3a322b");
       const zh = cssColor("--zh", "#9a4510");
       const card = cssColor("--card", "#fffdf8");
       const point = compact ? 3 : 4;
       const rows = [
-        ["原始分", list.map((item) => item.raw), label],
-        ["平均每题", list.map((item) => item.average), zh],
+        ["原始分", list.map((item) => item.raw), label, false],
+        ["平均每题", list.map((item) => item.average), zh, true],
       ];
       new window.Chart(canvas, {
         type: "bar",
@@ -157,7 +160,7 @@
         }],
         data: {
           labels: list.map((item) => item.when || `${item.count} 题`),
-          datasets: rows.flatMap(([name, data, color]) => [
+          datasets: rows.flatMap(([name, data, color, hidden]) => [
             {
               type: "bar",
               label: name,
@@ -165,6 +168,7 @@
               backgroundColor: color,
               borderRadius: 6,
               order: 2,
+              hidden: Boolean(hidden),
             },
             {
               type: "line",
@@ -180,6 +184,7 @@
               pointHoverRadius: point + 2,
               tension: 0,
               order: 1,
+              hidden: Boolean(hidden),
             },
           ]),
         },
@@ -279,7 +284,7 @@
     parent.appendChild(line);
   }
 
-  function answerCard(run, item, canRetake) {
+  function answerCard(run, item, canRetake, canRescore) {
     const card = document.createElement("article");
     card.className = "card progress-answer";
     if (retake === item.number) card.classList.add("is-retake");
@@ -289,12 +294,21 @@
     kicker.className = "kicker";
     kicker.textContent = `问题 ${item.number}`;
     head.appendChild(kicker);
-    if (canRetake) {
+    if (canRetake || canRescore) {
       const actions = document.createElement("div");
       actions.className = "question-actions";
-      const again = button(retake === item.number ? "取消重答" : "重答", "retake", "text-btn");
-      again.dataset.retake = String(item.number);
-      actions.appendChild(again);
+      if (canRetake) {
+        const again = button(retake === item.number ? "取消重答" : "重答", "retake", "text-btn");
+        again.dataset.retake = String(item.number);
+        actions.appendChild(again);
+      }
+      if (canRescore && item.has_audio && (item.transcript || "").trim()) {
+        const againScore = button(rescoring ? "重评中…" : "重评", "rescore", "text-btn");
+        againScore.dataset.rescore = String(item.number);
+        againScore.dataset.runId = (run && run.id) || "";
+        againScore.disabled = Boolean(rescoring);
+        actions.appendChild(againScore);
+      }
       head.appendChild(actions);
     }
     card.appendChild(head);
@@ -960,6 +974,16 @@
       summary.className = "note";
       summary.textContent = runSummaryText(run);
       head.appendChild(summary);
+      const scored = (run.answers || []).filter((item) => item.has_audio && (item.transcript || "").trim());
+      if (scored.length) {
+        const actions = document.createElement("div");
+        actions.className = "question-actions";
+        const all = button(rescoring ? "重评中…" : "全部重评", "rescore-all", "text-btn");
+        all.dataset.runId = run.id || "";
+        all.disabled = Boolean(rescoring);
+        actions.appendChild(all);
+        head.appendChild(actions);
+      }
     }
     runRoot.appendChild(head);
     if (!run) {
@@ -969,7 +993,60 @@
       runRoot.appendChild(empty);
       return;
     }
-    (run.answers || []).forEach((item) => runRoot.appendChild(answerCard(run, item)));
+    (run.answers || []).forEach((item) => runRoot.appendChild(answerCard(run, item, false, true)));
+  }
+
+  function currentRunFrom(page, id) {
+    return ((page && page.runs) || []).find((item) => item && item.id === id) || null;
+  }
+
+  function toast(text) {
+    if (window.quickbackToast) window.quickbackToast(text);
+    else if (report) report(text);
+  }
+
+  async function rescoreAnswer(id, number) {
+    if (!api || !id || !number || rescoring) return;
+    rescoring = true;
+    renderRun(runPage, currentRunFrom(runPage, id));
+    try {
+      const page = await api(`/api/progress/${id}/answers/${number}/rescore`, { method: "POST" });
+      runPage = page;
+      renderRun(page, currentRunFrom(page, id));
+      if (report) report("");
+      toast("已重评这一题。");
+    } catch (error) {
+      if (report) report(error.message);
+      renderRun(runPage, currentRunFrom(runPage, id));
+    } finally {
+      rescoring = false;
+      renderRun(runPage, currentRunFrom(runPage, id));
+    }
+  }
+
+  async function rescoreAll(id) {
+    if (!api || !id || rescoring) return;
+    rescoring = true;
+    renderRun(runPage, currentRunFrom(runPage, id));
+    try {
+      const page = await api(`/api/progress/${id}/rescore`, { method: "POST" });
+      runPage = page;
+      renderRun(page, currentRunFrom(page, id));
+      if (report) report("");
+      toast("这次记录已全部重评。");
+    } catch (error) {
+      if (report) report(error.message);
+      try {
+        const page = await api(`/api/questions/${encodeURIComponent(questionId)}/progress`);
+        runPage = page;
+        renderRun(page, currentRunFrom(page, id));
+      } catch (_error) {
+        renderRun(runPage, currentRunFrom(runPage, id));
+      }
+    } finally {
+      rescoring = false;
+      renderRun(runPage, currentRunFrom(runPage, id));
+    }
   }
 
   function recordingBlock() {
@@ -1192,6 +1269,23 @@
   bindRunClicks(root);
   bindRunClicks(statsRoot);
 
+  const runRootEl = document.getElementById("progress-run-root");
+  if (runRootEl) {
+    runRootEl.addEventListener("click", (event) => {
+      const target = event.target.closest("[data-progress-action]");
+      if (!target || target.disabled) return;
+      const action = target.dataset.progressAction;
+      const id = target.dataset.runId || runViewId;
+      if (action === "rescore") {
+        rescoreAnswer(id, Number(target.dataset.rescore));
+        return;
+      }
+      if (action === "rescore-all") {
+        rescoreAll(id);
+      }
+    });
+  }
+
   if (root) {
     root.addEventListener("submit", (event) => {
       const form = event.target.closest("[data-draft-form]");
@@ -1339,6 +1433,8 @@
       api = request;
       report = notify;
       questionId = id || "";
+      runViewId = runId || "";
+      rescoring = false;
       const runRoot = document.getElementById("progress-run-root");
       if (runRoot) {
         runRoot.replaceChildren();
@@ -1348,16 +1444,19 @@
         runRoot.appendChild(waiting);
       }
       if (!id || !runId) {
+        runPage = null;
         renderRun(null, null);
         return;
       }
       try {
         const page = await request(`/api/questions/${encodeURIComponent(id)}/progress`);
-        const run = (page.runs || []).find((item) => item.id === runId) || null;
+        runPage = page;
+        const run = currentRunFrom(page, runId);
         renderRun(page, run);
         if (notify) notify("");
       } catch (error) {
         if (notify) notify(error.message);
+        runPage = null;
         renderRun(null, null);
       }
     },
